@@ -4,9 +4,7 @@
 .gitattributes
 
 # CI/CD & Development
-.github
 .gitlab-ci.yml
-.github/workflows/
 .vscode
 .vs
 
