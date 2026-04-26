@@ -1,5 +1,5 @@
 <Solution>
-  <Project Path="ai-service/Simcag.AIService.Api.csproj" />
+  <Project Path="Simcag.AIService.Api/Simcag.AIService.Api.csproj" />
   <Project Path="Simcag.AIService.Application/Simcag.AIService.Application.csproj" />
   <Project Path="Simcag.AIService.Domain/Simcag.AIService.Domain.csproj" />
   <Project Path="Simcag.AIService.Infrastructure/Simcag.AIService.Infrastructure.csproj" />

@@ -1,10 +1,15 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+﻿namespace Simcag.AIService.Application.Exceptions;
 
-namespace Simcag.AIService.Application.Exceptions
+/// <summary>
+/// Erro previsível da camada de integração com o motor de IA (Ollama) ou condições operacionais equivalentes.
+/// </summary>
+public sealed class AiServiceException : Exception
 {
-    internal class AiServiceException
+    public AiServiceException(string message) : base(message)
+    {
+    }
+
+    public AiServiceException(string message, Exception innerException) : base(message, innerException)
     {
     }
 }

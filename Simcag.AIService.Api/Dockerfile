@@ -1,30 +1,24 @@
-# See https://aka.ms/customizecontainer to learn how to customize your debug container and how Visual Studio uses this Dockerfile to build your images for faster debugging.
-
-# This stage is used when running from VS in fast mode (Default for Debug configuration)
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base
-USER $APP_UID
 WORKDIR /app
-EXPOSE 8080
-EXPOSE 8081
+EXPOSE 80
+EXPOSE 443
 
-
-# This stage is used to build the service project
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
-ARG BUILD_CONFIGURATION=Release
 WORKDIR /src
-COPY ["ai-service/ai-service.csproj", "ai-service/"]
-RUN dotnet restore "./ai-service/ai-service.csproj"
+COPY ["Simcag.AIService.Api/Simcag.AIService.Api.csproj", "Simcag.AIService.Api/"]
+COPY ["Simcag.AIService.Application/Simcag.AIService.Application.csproj", "Simcag.AIService.Application/"]
+COPY ["Simcag.AIService.Domain/Simcag.AIService.Domain.csproj", "Simcag.AIService.Domain/"]
+COPY ["Simcag.AIService.Infrastructure/Simcag.AIService.Infrastructure.csproj", "Simcag.AIService.Infrastructure/"]
+COPY ["shared/shared.csproj", "shared/"]
+RUN dotnet restore "Simcag.AIService.Api/Simcag.AIService.Api.csproj"
 COPY . .
-WORKDIR "/src/ai-service"
-RUN dotnet build "./ai-service.csproj" -c $BUILD_CONFIGURATION -o /app/build
+WORKDIR "/src/Simcag.AIService.Api"
+RUN dotnet build "Simcag.AIService.Api.csproj" -c Release -o /app/build
 
-# This stage is used to publish the service project to be copied to the final stage
 FROM build AS publish
-ARG BUILD_CONFIGURATION=Release
-RUN dotnet publish "./ai-service.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
+RUN dotnet publish "Simcag.AIService.Api.csproj" -c Release -o /app/publish
 
-# This stage is used in production or when running from VS in regular mode (Default when not using the Debug configuration)
 FROM base AS final
 WORKDIR /app
 COPY --from=publish /app/publish .
-ENTRYPOINT ["dotnet", "ai-service.dll"]
+ENTRYPOINT ["dotnet", "Simcag.AIService.Api.dll"]

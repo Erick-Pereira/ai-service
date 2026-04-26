@@ -18,9 +18,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Simcag.Shared" Version="1.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Simcag.AIService.Application\Simcag.AIService.Application.csproj" />
     <ProjectReference Include="..\Simcag.AIService.Domain\Simcag.AIService.Domain.csproj" />
-    <ProjectReference Include="..\..\shared\shared.csproj" />
   </ItemGroup>
 
   <ItemGroup>

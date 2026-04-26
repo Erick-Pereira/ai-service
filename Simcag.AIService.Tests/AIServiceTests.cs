@@ -1,124 +1,240 @@
 using FluentAssertions;
 using Microsoft.Extensions.Logging;
 using Moq;
+using Simcag.AIService.Application.Contracts;
 using Simcag.AIService.Application.Interfaces;
+using Simcag.AIService.Application.Services;
+using Simcag.AIService.Domain.Entities;
+using Simcag.AIService.Domain.Services;
+using Simcag.AIService.Domain.ValueObjects;
+using Simcag.Shared.Events;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
 
 namespace Simcag.AIService.Tests;
 
-public class AIServiceTests
+/// <summary>
+/// Tests for Financial AI Services after refactoring.
+/// </summary>
+public class FinancialAIServiceTests
 {
-    private readonly Mock<IOllamaClient> _ollamaClientMock;
-    private readonly Mock<ILogger<Simcag.AIService.Application.Services.AIService>> _loggerMock;
-    private readonly Mock<ICategoryRepository> _categoryRepositoryMock;
-    private readonly Mock<IAIProcessingResultRepository> _processingResultRepositoryMock;
-    private readonly Mock<Simcag.Shared.Messaging.Contracts.IEventPublisher<Simcag.Shared.Events.NormalizedDataEvent>> _normalizedPublisherMock;
-    private readonly Mock<Simcag.Shared.Messaging.Contracts.IEventPublisher<Simcag.Shared.Events.CategorizedDataEvent>> _categorizedPublisherMock;
-    private readonly Simcag.AIService.Application.Services.AIService _aiService;
-
-    public AIServiceTests()
-    {
-        _ollamaClientMock = new Mock<IOllamaClient>();
-        _loggerMock = new Mock<ILogger<Simcag.AIService.Application.Services.AIService>>();
-        _categoryRepositoryMock = new Mock<ICategoryRepository>();
-        _processingResultRepositoryMock = new Mock<IAIProcessingResultRepository>();
-        _normalizedPublisherMock = new Mock<Simcag.Shared.Messaging.Contracts.IEventPublisher<Simcag.Shared.Events.NormalizedDataEvent>>();
-        _categorizedPublisherMock = new Mock<Simcag.Shared.Messaging.Contracts.IEventPublisher<Simcag.Shared.Events.CategorizedDataEvent>>();
-
-        _aiService = new Simcag.AIService.Application.Services.AIService(
-            _ollamaClientMock.Object,
-            _loggerMock.Object,
-            _categoryRepositoryMock.Object,
-            _processingResultRepositoryMock.Object,
-            _normalizedPublisherMock.Object,
-            _categorizedPublisherMock.Object);
-    }
-
+    // ---------- Expense Classification Tests ----------
     [Fact]
-    public async Task CategorizeProductAsync_ShouldReturnAICategory_WhenOllamaIsAvailable()
+    public async Task ClassifyAsync_ShouldReturnAICategory_WhenOllamaAvailable()
     {
-        var productDescription = "Dell Inspiron 15 Notebook i7";
-        var expectedCategory = Simcag.AIService.Domain.Entities.ProductCategory.Create("Notebook", "Laptops and notebooks");
+        // Arrange
+        var ollamaMock = new Mock<IOllamaClient>();
+        var loggerMock = new Mock<ILogger<ExpenseClassificationService>>();
+        var repoMock = new Mock<ICategoryRepository>();
+        var matcherMock = new Mock<ICategoryMatcher>();
+        var extractorMock = new Mock<ICategoryResponseExtractor>();
+        var confidenceMock = new Mock<IConfidenceCalculator>();
 
-        _ollamaClientMock.Setup(x => x.IsAvailableAsync(It.IsAny<CancellationToken>()))
-            .ReturnsAsync(true);
-        _ollamaClientMock.Setup(x => x.GenerateCompletionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync("Notebook");
-        _categoryRepositoryMock.Setup(x => x.GetByNameAsync("Notebook", It.IsAny<CancellationToken>()))
-            .ReturnsAsync(expectedCategory);
+        var rawData = new RawFinancialDataEvent
+        {
+            DocumentId = "doc123",
+            RawText = "Dell Inspiron 15 Notebook i7",
+            DocumentType = "Invoice",
+            Source = "test",
+            FileHash = string.Empty,
+            ExtractedFields = new Dictionary<string, object?>(),
+            OccurredAt = DateTime.UtcNow,
+            Timestamp = DateTime.UtcNow,
+            ExtractedItems = null
+        };
 
-        var result = await _aiService.CategorizeProductAsync(productDescription, CancellationToken.None);
+        var categoryEntity = ProductCategory.Create("Notebook", "Laptops");
+        var aiResponse = "Notebook";
+        var extractedCategory = new CategoryName("Notebook");
+        var confidenceScore = new ConfidenceScore(0.9m);
 
+        ollamaMock.Setup(x => x.IsAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        ollamaMock.Setup(x => x.GenerateCompletionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(aiResponse);
+        repoMock.Setup(x => x.GetByNameAsync("Notebook", It.IsAny<CancellationToken>())).ReturnsAsync(categoryEntity);
+        extractorMock.Setup(x => x.Extract(aiResponse)).Returns(extractedCategory);
+        confidenceMock.Setup(x => x.Calculate(aiResponse, extractedCategory)).Returns(confidenceScore);
+
+        var inferenceCacheMock = new Mock<IAiInferenceCache>();
+        var service = new ExpenseClassificationService(
+            ollamaMock.Object, loggerMock.Object, repoMock.Object,
+            matcherMock.Object, extractorMock.Object, confidenceMock.Object, inferenceCacheMock.Object);
+
+        // Act
+        var result = await service.ClassifyAsync(rawData, CancellationToken.None);
+
+        // Assert
         result.Should().NotBeNull();
         result.CategoryName.Should().Be("Notebook");
         result.UsedFallback.Should().BeFalse();
-        result.Confidence.Should().BeGreaterThan(0);
+        result.Confidence.Should().Be(0.9m);
     }
 
     [Fact]
-    public async Task CategorizeProductAsync_ShouldUseFallback_WhenOllamaIsUnavailable()
+    public async Task ClassifyAsync_ShouldUseFallback_WhenOllamaUnavailable()
     {
-        var productDescription = "Dell Inspiron 15 Notebook i7";
+        // Arrange
+        var ollamaMock = new Mock<IOllamaClient>();
+        var loggerMock = new Mock<ILogger<ExpenseClassificationService>>();
+        var repoMock = new Mock<ICategoryRepository>();
+        var matcher = new CategoryMatcher();
+        var extractorMock = new Mock<ICategoryResponseExtractor>();
+        var confidenceMock = new Mock<IConfidenceCalculator>();
 
-        _ollamaClientMock.Setup(x => x.IsAvailableAsync(It.IsAny<CancellationToken>()))
-            .ReturnsAsync(false);
+        var rawData = new RawFinancialDataEvent
+        {
+            DocumentId = "doc123",
+            RawText = "CPU Intel i7",
+            DocumentType = "Invoice",
+            Source = "test",
+            OccurredAt = DateTime.UtcNow,
+            Timestamp = DateTime.UtcNow,
+            ExtractedFields = new Dictionary<string, object?>(),
+            FileHash = string.Empty,
+            ExtractedItems = null
+        };
 
-        var result = await _aiService.CategorizeProductAsync(productDescription, CancellationToken.None);
+        ollamaMock.Setup(x => x.IsAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(false);
 
+        var hardwareCategory = ProductCategory.Create("Hardware", "Hardware components");
+        repoMock.Setup(x => x.GetByNameAsync("Hardware", It.IsAny<CancellationToken>())).ReturnsAsync(hardwareCategory);
+        repoMock.Setup(x => x.GetByNameAsync("Outro", It.IsAny<CancellationToken>())).ReturnsAsync(ProductCategory.Create("Outro", "Other"));
+
+        var inferenceCacheMock = new Mock<IAiInferenceCache>();
+        var service = new ExpenseClassificationService(
+            ollamaMock.Object, loggerMock.Object, repoMock.Object,
+            matcher, extractorMock.Object, confidenceMock.Object, inferenceCacheMock.Object);
+
+        // Act
+        var result = await service.ClassifyAsync(rawData, CancellationToken.None);
+
+        // Assert
         result.Should().NotBeNull();
         result.UsedFallback.Should().BeTrue();
+        result.CategoryName.Should().Be("Hardware");
     }
 
+    // ---------- Supplier Extraction Tests ----------
     [Fact]
-    public async Task ExtractEntitiesAsync_ShouldReturnExtractedData_WhenOllamaIsAvailable()
+    public async Task ExtractAsync_ShouldReturnExtractedData_WhenOllamaAvailable()
     {
-        var productDescription = "Dell Inspiron 15 i7 16GB RAM";
-        var mockResponse = "{\"brand\": \"Dell\", \"model\": \"Inspiron 15\", \"features\": [\"i7\", \"16GB RAM\"]}";
+        // Arrange
+        var ollamaMock = new Mock<IOllamaClient>();
+        var loggerMock = new Mock<ILogger<SupplierExtractionService>>();
 
-        _ollamaClientMock.Setup(x => x.IsAvailableAsync(It.IsAny<CancellationToken>()))
-            .ReturnsAsync(true);
-        _ollamaClientMock.Setup(x => x.GenerateCompletionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+        var rawData = new RawFinancialDataEvent
+        {
+            DocumentId = "doc123",
+            RawText = "Supplier: Dell, CNPJ: 12.345.678/0001-00",
+            DocumentType = "Invoice",
+            Source = "test",
+            OccurredAt = DateTime.UtcNow,
+            Timestamp = DateTime.UtcNow,
+            ExtractedFields = new Dictionary<string, object?>(),
+            FileHash = string.Empty,
+            ExtractedItems = null
+        };
+
+        var mockResponse = "{\"supplierName\": \"Dell\", \"taxId\": \"12.345.678/0001-00\"}";
+        ollamaMock.Setup(x => x.IsAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        ollamaMock.Setup(x => x.GenerateCompletionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(mockResponse);
 
-        var result = await _aiService.ExtractEntitiesAsync(productDescription, CancellationToken.None);
+        var nameNormalizationMock = new Mock<INameNormalizationService>();
+        var inferenceCacheMock = new Mock<IAiInferenceCache>();
+        var service = new SupplierExtractionService(ollamaMock.Object, loggerMock.Object, nameNormalizationMock.Object, inferenceCacheMock.Object);
 
+        // Act
+        var result = await service.ExtractAsync(rawData, CancellationToken.None);
+
+        // Assert
         result.Should().NotBeNull();
-        result.Brand.Should().Be("Dell");
+        result.RawSupplierName.Should().Be("Dell");
+        result.TaxId.Should().Be("12.345.678/0001-00");
+        result.UsedFallback.Should().BeFalse();
+        result.Product.Should().NotBeNull();
+        result.Product.UsedFallback.Should().BeTrue();
+        result.Product.Features.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ExtractAsync_ShouldParseBrandModelFeatures_WhenPresentInJson()
+    {
+        var ollamaMock = new Mock<IOllamaClient>();
+        var loggerMock = new Mock<ILogger<SupplierExtractionService>>();
+
+        var rawData = new RawFinancialDataEvent
+        {
+            DocumentId = "doc999",
+            RawText = "NF Dell",
+            DocumentType = "Invoice",
+            Source = "test",
+            OccurredAt = DateTime.UtcNow,
+            Timestamp = DateTime.UtcNow,
+            ExtractedFields = new Dictionary<string, object?>(),
+            FileHash = string.Empty,
+            ExtractedItems = null
+        };
+
+        var mockResponse =
+            "{\"supplierName\":\"Dell\",\"taxId\":null,\"brand\":\"Dell\",\"model\":\"Inspiron 15\",\"features\":[\"16GB RAM\",\"512GB SSD\"],\"supplierConfidence\":0.9,\"supplierUsedFallback\":false,\"productConfidence\":0.88,\"productUsedFallback\":false}";
+        ollamaMock.Setup(x => x.IsAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        ollamaMock.Setup(x => x.GenerateCompletionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(mockResponse);
+
+        var nameNormalizationMock = new Mock<INameNormalizationService>();
+        nameNormalizationMock
+            .Setup(x => x.NormalizeAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new NormalizedNameResult("Dell", "DELL", 0.8m, false));
+
+        var inferenceCacheMock = new Mock<IAiInferenceCache>();
+        var service = new SupplierExtractionService(ollamaMock.Object, loggerMock.Object, nameNormalizationMock.Object, inferenceCacheMock.Object);
+
+        var result = await service.ExtractAsync(rawData, CancellationToken.None);
+
+        result.Product.Brand.Should().Be("Dell");
+        result.Product.Model.Should().Be("Inspiron 15");
+        result.Product.Features.Should().ContainInOrder("16GB RAM", "512GB SSD");
+        result.Product.Confidence.Should().Be(0.88m);
+        result.Product.UsedFallback.Should().BeFalse();
+        result.Confidence.Should().Be(0.9m);
         result.UsedFallback.Should().BeFalse();
     }
 
     [Fact]
-    public async Task StandardizeNameAsync_ShouldReturnStandardizedName_WhenOllamaIsAvailable()
+    public async Task ExtractAsync_ShouldUseFallback_WhenOllamaUnavailable()
     {
-        var productName = "DELL INSPIRON 15 NOTEBOOK";
-        var standardizedName = "Dell Inspiron 15 Notebook";
+        // Arrange
+        var ollamaMock = new Mock<IOllamaClient>();
+        var loggerMock = new Mock<ILogger<SupplierExtractionService>>();
 
-        _ollamaClientMock.Setup(x => x.IsAvailableAsync(It.IsAny<CancellationToken>()))
-            .ReturnsAsync(true);
-        _ollamaClientMock.Setup(x => x.GenerateCompletionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(standardizedName);
+        var rawData = new RawFinancialDataEvent
+        {
+            DocumentId = "doc123",
+            RawText = "DELL COMPUTERS LTDA - CNPJ: 12.345.678/0001-00",
+            DocumentType = "Invoice",
+            Source = "test",
+            OccurredAt = DateTime.UtcNow,
+            Timestamp = DateTime.UtcNow,
+            ExtractedFields = new Dictionary<string, object?>(),
+            FileHash = string.Empty,
+            ExtractedItems = null
+        };
 
-        var result = await _aiService.StandardizeNameAsync(productName, CancellationToken.None);
+        ollamaMock.Setup(x => x.IsAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(false);
 
+        var nameNormalizationMock = new Mock<INameNormalizationService>();
+        var inferenceCacheMock = new Mock<IAiInferenceCache>();
+        var service = new SupplierExtractionService(ollamaMock.Object, loggerMock.Object, nameNormalizationMock.Object, inferenceCacheMock.Object);
+
+        // Act
+        var result = await service.ExtractAsync(rawData, CancellationToken.None);
+
+        // Assert
         result.Should().NotBeNull();
-        result.StandardizedName.Should().Be(standardizedName);
-        result.UsedFallback.Should().BeFalse();
-    }
-
-    [Fact]
-    public async Task StandardizeNameAsync_ShouldUseFallback_WhenOllamaIsUnavailable()
-    {
-        var productName = "dell inspiron 15  notebook";
-
-        _ollamaClientMock.Setup(x => x.IsAvailableAsync(It.IsAny<CancellationToken>()))
-            .ReturnsAsync(false);
-
-        var result = await _aiService.StandardizeNameAsync(productName, CancellationToken.None);
-
-        result.Should().NotBeNull();
-        result.StandardizedName.Should().Be("Dell Inspiron 15 Notebook");
         result.UsedFallback.Should().BeTrue();
+        result.RawSupplierName.Should().NotBeNullOrEmpty();
     }
 }

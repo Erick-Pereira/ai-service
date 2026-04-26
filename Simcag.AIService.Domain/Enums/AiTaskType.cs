@@ -1,10 +1,9 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+namespace Simcag.AIService.Domain.Enums;
 
-namespace Simcag.AIService.Domain.Enums
+public enum AiTaskType
 {
-    internal class AiTaskType
-    {
-    }
+    Categorization = 1,
+    EntityExtraction = 2,
+    Standardization = 3,
+    Matching = 4
 }

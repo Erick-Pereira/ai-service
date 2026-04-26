@@ -1,0 +1,41 @@
+using Simcag.AIService.Domain.ValueObjects;
+using Simcag.Shared.Events;
+
+namespace Simcag.AIService.Application.Interfaces;
+
+/// <summary>
+/// Serviço de classificação de categoria de despesa.
+/// </summary>
+public interface IExpenseClassificationService
+{
+    Task<CategoryResult> ClassifyAsync(RawFinancialDataEvent financialData, CancellationToken ct);
+}
+
+/// <summary>
+/// Serviço de extração de informações do fornecedor.
+/// </summary>
+public interface ISupplierExtractionService
+{
+    Task<SupplierExtractionResult> ExtractAsync(RawFinancialDataEvent financialData, CancellationToken ct);
+}
+
+/// <summary>
+/// Serviço de normalização de nomes (fornecedores, descrições).
+/// </summary>
+public interface INameNormalizationService
+{
+    Task<NormalizedNameResult> NormalizeAsync(string rawName, CancellationToken ct);
+}
+
+/// <summary>
+/// Orquestrador do pipeline completo de enriquecimento financeiro.
+/// </summary>
+public interface IFinancialEnrichmentOrchestrator
+{
+    Task<Simcag.Shared.Events.EnrichedFinancialDataEvent> EnrichAsync(RawFinancialDataEvent rawData, CancellationToken ct);
+}
+
+// DTOs de resultado
+public sealed record CategoryResult(Guid CategoryId, string CategoryName, decimal Confidence, string Reasoning, bool UsedFallback);
+public sealed record SupplierExtractionResult(string RawSupplierName, string NormalizedSupplierName, string? TaxId, decimal Confidence, bool UsedFallback);
+public sealed record NormalizedNameResult(string OriginalName, string NormalizedName, decimal Confidence, bool UsedFallback);
