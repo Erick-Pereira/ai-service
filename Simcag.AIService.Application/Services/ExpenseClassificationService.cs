@@ -6,6 +6,7 @@ using Simcag.AIService.Domain.Services;
 using Simcag.AIService.Domain.ValueObjects;
 using Simcag.Shared.Events;
 using Microsoft.Extensions.Logging;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -56,7 +57,8 @@ public sealed class ExpenseClassificationService : IExpenseClassificationService
         {
             try
             {
-                var categories = (await _categoryRepo.GetActiveAsync(ct))
+                var activeCategories = await _categoryRepo.GetActiveAsync(ct);
+                var categories = (activeCategories ?? Enumerable.Empty<ProductCategory>())
                     .Select(c => c.Name.Value)
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToArray();

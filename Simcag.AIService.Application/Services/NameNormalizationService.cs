@@ -14,10 +14,10 @@ namespace Simcag.AIService.Application.Services;
 public sealed class NameNormalizationService : INameNormalizationService
 {
     private const string CachePrefix = "ai-service:supplier-normalization:";
-    private readonly INormalizationCache? _cache;
+    private readonly INormalizationCache _cache;
     private readonly TimeSpan _ttl;
 
-    public NameNormalizationService(INormalizationCache? cache = null)
+    public NameNormalizationService(INormalizationCache cache)
     {
         _cache = cache;
         _ttl = AiServiceEnvironment.SupplierNormalizationCacheTtl;
@@ -39,33 +39,22 @@ public sealed class NameNormalizationService : INameNormalizationService
 
     private async Task<NormalizedNameResult> NormalizeWithCacheAsync(string rawName, CancellationToken ct)
     {
-        var cache = _cache;
-        if (cache is not null)
+        var key = CachePrefix + StableKey(rawName);
+        var cached = await _cache.GetAsync(key, ct);
+        if (!string.IsNullOrWhiteSpace(cached))
         {
-            var key = CachePrefix + StableKey(rawName);
-            var cached = await cache.GetAsync(key, ct);
-            if (!string.IsNullOrWhiteSpace(cached))
-            {
-                return new NormalizedNameResult(
-                    OriginalName: rawName,
-                    NormalizedName: cached,
-                    Confidence: 0.9m,
-                    UsedFallback: false);
-            }
-
-            var normalized = Normalize(rawName);
-            await cache.SetAsync(key, normalized, _ttl, ct);
             return new NormalizedNameResult(
                 OriginalName: rawName,
-                NormalizedName: normalized,
+                NormalizedName: cached,
                 Confidence: 0.9m,
                 UsedFallback: false);
         }
 
-        var noCacheNormalized = Normalize(rawName);
+        var normalized = Normalize(rawName);
+        await _cache.SetAsync(key, normalized, _ttl, ct);
         return new NormalizedNameResult(
             OriginalName: rawName,
-            NormalizedName: noCacheNormalized,
+            NormalizedName: normalized,
             Confidence: 0.9m,
             UsedFallback: false);
     }

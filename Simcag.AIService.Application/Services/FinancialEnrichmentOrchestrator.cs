@@ -1,3 +1,4 @@
+using Simcag.AIService.Application.Configuration;
 using Simcag.AIService.Application.Contracts;
 using Simcag.AIService.Application.Interfaces;
 using Simcag.Shared.Events;
@@ -59,9 +60,16 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
             normalizedSupplierName = normalized.NormalizedName;
         }
 
-        var overallConfidence = Math.Min(
-            Math.Min(categoryResult.Confidence, supplierResult.Confidence),
-            supplierResult.Product.Confidence);
+        var overallConfidence = FinancialEnrichmentConfidence.ComputeOverall(categoryResult, supplierResult);
+        if (overallConfidence < AiServiceEnvironment.LowConfidenceThreshold)
+        {
+            _logger.LogInformation(
+                "Enrichment overall confidence {Confidence:F2} below threshold {Threshold:F2} for document {DocumentId}",
+                overallConfidence,
+                AiServiceEnvironment.LowConfidenceThreshold,
+                rawData.DocumentId);
+        }
+
         var usedFallback = categoryResult.UsedFallback
             || supplierResult.UsedFallback
             || supplierResult.Product.UsedFallback;
@@ -75,7 +83,7 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
             UsedFallback = supplierResult.Product.UsedFallback
         };
 
-        var items = BuildFinancialItems(rawData, supplierResult);
+        var items = FinancialEnrichmentItemBuilder.Build(rawData, supplierResult).ToList();
 
         var enrichedEvent = new EnrichedFinancialDataEvent
         {
@@ -106,38 +114,5 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
             rawData.DocumentId, categoryResult.CategoryName, normalizedSupplierName, items.Count, overallConfidence, publish);
 
         return enrichedEvent;
-    }
-
-    /// <summary>Monta linhas de item a partir do produto extraído; se vazio, usa o texto bruto compactado como uma linha descritiva.</summary>
-    private static List<FinancialItem> BuildFinancialItems(RawFinancialDataEvent raw, SupplierExtractionResult s)
-    {
-        var items = new List<FinancialItem>();
-        var p = s.Product;
-
-        if (!string.IsNullOrWhiteSpace(p.Brand) || !string.IsNullOrWhiteSpace(p.Model))
-        {
-            var line = string.Join(' ', new[] { p.Brand, p.Model }.Where(x => !string.IsNullOrWhiteSpace(x))).Trim();
-            if (line.Length > 0)
-                items.Add(new FinancialItem { Description = line, Amount = 0m });
-        }
-
-        foreach (var f in p.Features)
-        {
-            if (!string.IsNullOrWhiteSpace(f))
-                items.Add(new FinancialItem { Description = f.Trim(), Amount = 0m });
-        }
-
-        if (items.Count == 0 && !string.IsNullOrWhiteSpace(raw.RawText))
-        {
-            var compact = raw.RawText.Replace('\r', ' ').Replace('\n', ' ').Trim();
-            while (compact.Contains("  ", StringComparison.Ordinal))
-                compact = compact.Replace("  ", " ", StringComparison.Ordinal);
-            if (compact.Length > 512)
-                compact = compact[..512];
-            if (compact.Length > 0)
-                items.Add(new FinancialItem { Description = compact, Amount = 0m });
-        }
-
-        return items;
     }
 }

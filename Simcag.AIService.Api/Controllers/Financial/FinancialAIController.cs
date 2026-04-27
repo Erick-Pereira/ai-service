@@ -10,7 +10,9 @@ namespace Simcag.AIService.Api.Controllers.Financial;
 
 /// <summary>
 /// API síncrona do pipeline financeiro. Rotas canónicas: <c>categorize</c>, <c>extract</c>, <c>standardize</c>, <c>process</c>
-/// (aliases <c>classify</c>, <c>normalize</c>, <c>enrich</c> mantidos). <c>POST …/process</c> publica no Rabbit; <c>enrich/preview</c> e batches não publicam.
+/// (aliases <c>classify</c>, <c>normalize</c>, <c>enrich</c> mantidos).
+/// <c>POST …/process</c> e <c>POST …/process/from-raw</c> publicam <see cref="EnrichedFinancialDataEvent"/> no exchange configurado;
+/// <c>POST …/enrich</c>, <c>…/enrich/preview</c> e <c>…/enrich/from-raw</c> executam o mesmo pipeline sem publicar. Batches nunca publicam.
 /// </summary>
 [ApiController]
 [ApiExplorerSettings(GroupName = "financial-audit")]
@@ -193,8 +195,7 @@ public sealed class FinancialAIController : ControllerBase
 
     /// <summary>Executa o pipeline completo e publica <see cref="EnrichedFinancialDataEvent"/> no exchange configurado.</summary>
     [HttpPost("process")]
-    [HttpPost("enrich")]
-    public async Task<IActionResult> Enrich([FromBody] EnrichRequest request, CancellationToken ct)
+    public async Task<IActionResult> Process([FromBody] EnrichRequest request, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.RawText))
             return BadRequest(ApiResponse<string>.Fail("Raw text is required"));
@@ -211,7 +212,8 @@ public sealed class FinancialAIController : ControllerBase
         }
     }
 
-    /// <summary>Mesmo pipeline que <c>POST enrich</c>, sem publicar no RabbitMQ (adequado para UI de revisão / testes).</summary>
+    /// <summary>Pipeline completo sem publicar no RabbitMQ (UI de revisão / testes). <c>enrich/preview</c> é alias desta rota.</summary>
+    [HttpPost("enrich")]
     [HttpPost("enrich/preview")]
     public async Task<IActionResult> EnrichPreview([FromBody] EnrichRequest request, CancellationToken ct)
     {
@@ -230,7 +232,28 @@ public sealed class FinancialAIController : ControllerBase
         }
     }
 
-    /// <summary>Aceita o mesmo contrato do evento Rabbit <see cref="RawFinancialDataEvent"/> (útil para reprocessar payloads armazenados).</summary>
+    /// <summary>Publica no Rabbit após enriquecer um <see cref="RawFinancialDataEvent"/> completo (reprocessamento / backfill).</summary>
+    [HttpPost("process/from-raw")]
+    public async Task<IActionResult> ProcessFromRaw([FromBody] RawFinancialDataEvent payload, CancellationToken ct)
+    {
+        if (payload is null)
+            return BadRequest(ApiResponse<string>.Fail("Body is required"));
+        if (string.IsNullOrWhiteSpace(payload.RawText))
+            return BadRequest(ApiResponse<string>.Fail("RawText is required"));
+
+        try
+        {
+            var normalized = FinancialRawEventFactory.NormalizeFromApiPayload(payload);
+            var enriched = await _buildEnrichedEvent.ExecuteAsync(normalized, ct);
+            return Ok(ApiResponse<EnrichedFinancialDataEvent>.Ok(enriched));
+        }
+        catch (AiServiceException ex)
+        {
+            return AiFailure(ex);
+        }
+    }
+
+    /// <summary>Aceita o mesmo contrato do evento Rabbit <see cref="RawFinancialDataEvent"/>, sem publicar (pré-visualização).</summary>
     [HttpPost("enrich/from-raw")]
     public async Task<IActionResult> EnrichFromRaw([FromBody] RawFinancialDataEvent payload, CancellationToken ct)
     {
@@ -242,7 +265,7 @@ public sealed class FinancialAIController : ControllerBase
         try
         {
             var normalized = FinancialRawEventFactory.NormalizeFromApiPayload(payload);
-            var enriched = await _buildEnrichedEvent.ExecuteAsync(normalized, ct);
+            var enriched = await _previewEnrichment.ExecuteAsync(normalized, ct);
             return Ok(ApiResponse<EnrichedFinancialDataEvent>.Ok(enriched));
         }
         catch (AiServiceException ex)

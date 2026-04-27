@@ -1,4 +1,5 @@
 using Simcag.Shared.Events;
+using System.Linq;
 
 namespace Simcag.AIService.Api.Controllers.Financial;
 
@@ -34,7 +35,7 @@ public static class FinancialRawEventFactory
             ExtractedFields = request.ExtractedFields ?? new(),
             OccurredAt = request.OccurredAt == default ? DateTime.UtcNow : request.OccurredAt,
             Timestamp = DateTime.UtcNow,
-            ExtractedItems = null
+            ExtractedItems = request.ExtractedItems?.Select(x => (object)x).ToList()
         };
 
     /// <summary>Garante identificadores e timestamps mínimos para ingestão via API quando o cliente envia um evento parcial.</summary>

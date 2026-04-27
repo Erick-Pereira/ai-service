@@ -1,3 +1,5 @@
+using Simcag.Shared.Events;
+
 namespace Simcag.AIService.Api.Controllers.Financial;
 
 public sealed record EnrichRequest(
@@ -7,4 +9,5 @@ public sealed record EnrichRequest(
     string? Source,
     string? FileHash,
     Dictionary<string, object?>? ExtractedFields,
-    DateTime OccurredAt);
+    DateTime OccurredAt,
+    IReadOnlyList<FinancialItem>? ExtractedItems = null);
