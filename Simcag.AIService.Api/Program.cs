@@ -45,11 +45,11 @@ static string? GetEnv(params string[] keys)
 // RabbitMQ
 var rabbitOptions = new RabbitMqOptions
 {
-    Host = GetEnv("RABBITMQ_HOST", "RABBITMQ__HOST") ?? "localhost",
-    Port = int.Parse(GetEnv("RABBITMQ_PORT", "RABBITMQ__PORT") ?? "5672"),
-    UserName = GetEnv("RABBITMQ_USERNAME", "RABBITMQ__USERNAME") ?? "admin",
-    Password = GetEnv("RABBITMQ_PASSWORD", "RABBITMQ__PASSWORD") ?? "admin",
-    VirtualHost = GetEnv("RABBITMQ_VIRTUALHOST", "RABBITMQ__VIRTUALHOST") ?? "/"
+    Host = GetEnv("RABBITMQ__HOST", "RABBITMQ_HOST") ?? "localhost",
+    Port = int.Parse(GetEnv("RABBITMQ__PORT", "RABBITMQ_PORT") ?? "5672"),
+    UserName = GetEnv("RABBITMQ__USERNAME", "RABBITMQ_USERNAME") ?? "admin",
+    Password = GetEnv("RABBITMQ__PASSWORD", "RABBITMQ_PASSWORD") ?? "admin",
+    VirtualHost = GetEnv("RABBITMQ__VIRTUALHOST", "RABBITMQ_VIRTUALHOST") ?? "/"
 };
 
 builder.Services.AddRabbitMqMessaging(rabbitOptions);
@@ -57,7 +57,7 @@ builder.Services.AddRabbitMqMessaging(rabbitOptions);
 // Exchange direct de eventos de domínio (não usar EventBusConstants.ExchangeName = price-monitoring-exchange).
 // Fallback literal: compatível com pacotes Simcag.Shared antigos sem DefaultEventsExchange / GetEventsExchangeName.
 const string defaultDomainEventsExchange = "events";
-var eventsExchangeFromEnv = GetEnv("RABBITMQ_EVENTS_EXCHANGE", "RABBITMQ__EVENTS_EXCHANGE");
+var eventsExchangeFromEnv = GetEnv("RABBITMQ__EVENTS_EXCHANGE", "RABBITMQ_EVENTS_EXCHANGE");
 var eventsExchange = string.IsNullOrWhiteSpace(eventsExchangeFromEnv)
     ? defaultDomainEventsExchange
     : eventsExchangeFromEnv.Trim();
