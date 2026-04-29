@@ -78,6 +78,12 @@ var app = builder.Build();
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
+    // Swagger UI consome o documento gerado por Microsoft.AspNetCore.OpenApi (/openapi/v1.json)
+    app.UseSwaggerUI(c =>
+    {
+        c.SwaggerEndpoint("/openapi/v1.json", "SIMCAG AI Service v1");
+        c.RoutePrefix = "swagger";
+    });
 }
 
 // Em Development, clientes HTTP (ex.: curl na porta http) não devem levar 307 -> https (POST vira confuso / 405 no fallback).

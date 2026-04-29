@@ -2,11 +2,11 @@
   "profiles": {
     "Simcag.AIService.Api": {
       "commandName": "Project",
-      "launchBrowser": true,
+      "launchBrowser": false,
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development"
       },
-      "applicationUrl": "https://localhost:55970;http://localhost:55971"
+      "applicationUrl": "http://localhost:5008"
     }
   }
 }
