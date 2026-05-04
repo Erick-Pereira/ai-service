@@ -6,6 +6,7 @@
 # CI/CD & Development
 .gitlab-ci.yml
 .vscode
+.config
 .vs
 
 # IDEs
