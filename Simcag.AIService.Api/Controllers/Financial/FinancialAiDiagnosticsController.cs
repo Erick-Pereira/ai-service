@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Simcag.AIService.Api.Models.Financial;
 using Simcag.AIService.Application.Configuration;
 using Simcag.AIService.Application.Interfaces;
 using Simcag.Shared.Contracts;
@@ -7,7 +8,6 @@ namespace Simcag.AIService.Api.Controllers.Financial;
 
 /// <summary>Capacidade operacional, Ollama e variáveis efetivas (sem segredos).</summary>
 [ApiController]
-[ApiExplorerSettings(GroupName = "system-diagnostics")]
 [Route("api/ai/system")]
 public sealed class FinancialAiDiagnosticsController : ControllerBase
 {

@@ -1,7 +1,8 @@
+using Simcag.AIService.Api.Models.Financial;
 using Simcag.Shared.Events;
 using System.Linq;
 
-namespace Simcag.AIService.Api.Controllers.Financial;
+namespace Simcag.AIService.Api.Mapping;
 
 /// <summary>
 /// Constrói <see cref="RawFinancialDataEvent"/> a partir de pedidos HTTP simples ou normaliza payloads já estruturados.

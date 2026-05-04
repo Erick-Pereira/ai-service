@@ -1,4 +1,3 @@
-using Microsoft.AspNetCore.OpenApi;
 using Simcag.AIService.Api.Extensions;
 using Simcag.AIService.Api.OpenApi;
 using Simcag.AIService.Application.Workers;
@@ -6,26 +5,40 @@ using Simcag.Shared.Events;
 using Simcag.Shared.Messaging;
 using Simcag.Shared.Messaging.Configuration;
 using Simcag.Shared.Messaging.Extensions;
+using Simcag.Shared.Hosting;
 
-DotNetEnv.Env.Load();
+DotNetEnv.Env.NoClobber().Load();
+ContainerListenConfiguration.NormalizeAspNetCoreListenUrlsInContainer();
 
 var builder = WebApplication.CreateBuilder(args);
+ContainerListenConfiguration.ApplyDockerListenUrls(builder);
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 
-builder.Services.AddOpenApi(options =>
+builder.Services.AddSwaggerGen(c =>
 {
-    options.AddDocumentTransformer((document, _, _) =>
+    c.SwaggerDoc("v1", new Microsoft.OpenApi.OpenApiInfo
     {
-        document.Info ??= new();
-        document.Info.Title = "SIMCAG AI Service";
-        document.Info.Version = "v1";
-        document.Info.Description =
-            "Camada cognitiva: enriquecimento financeiro (auditoria condominial). Rotas /api/ai espelham o pipeline assíncrono (raw-financial-data → enriched).";
-        return Task.CompletedTask;
+        Title = "SIMCAG AI Service",
+        Version = "v1",
+        Description =
+            "Camada cognitiva: enriquecimento financeiro (auditoria condominial). Rotas /api/ai espelham o pipeline assíncrono (raw-financial-data → enriched)."
     });
-    options.AddOperationTransformer<FinancialAuditOpenApiOperationTransformer>();
+    c.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        In = Microsoft.OpenApi.ParameterLocation.Header,
+        Type = Microsoft.OpenApi.SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        Description = "Cole apenas o JWT (sem 'Bearer ')."
+    });
+    c.AddSecurityRequirement(document => new Microsoft.OpenApi.OpenApiSecurityRequirement
+    {
+        [new Microsoft.OpenApi.OpenApiSecuritySchemeReference("Bearer", document)] = []
+    });
+    c.OperationFilter<FinancialAiSwaggerOperationFilter>();
 });
 
 // Registro centralizado dos serviços AI (Financial domain)
@@ -77,11 +90,10 @@ var app = builder.Build();
 
 if (app.Environment.IsDevelopment())
 {
-    app.MapOpenApi();
-    // Swagger UI consome o documento gerado por Microsoft.AspNetCore.OpenApi (/openapi/v1.json)
+    app.UseSwagger();
     app.UseSwaggerUI(c =>
     {
-        c.SwaggerEndpoint("/openapi/v1.json", "SIMCAG AI Service v1");
+        c.SwaggerEndpoint("/swagger/v1/swagger.json", "SIMCAG AI Service v1");
         c.RoutePrefix = "swagger";
     });
 }

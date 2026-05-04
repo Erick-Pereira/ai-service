@@ -1,4 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
+using Simcag.AIService.Api.Mapping;
+using Simcag.AIService.Api.Models.Financial;
 using Simcag.AIService.Application.Contracts;
 using Simcag.AIService.Application.Exceptions;
 using Simcag.AIService.Application.Interfaces;
@@ -15,7 +17,6 @@ namespace Simcag.AIService.Api.Controllers.Financial;
 /// <c>POST …/enrich</c>, <c>…/enrich/preview</c> e <c>…/enrich/from-raw</c> executam o mesmo pipeline sem publicar. Batches nunca publicam.
 /// </summary>
 [ApiController]
-[ApiExplorerSettings(GroupName = "financial-audit")]
 [Route("api/ai")]
 public sealed class FinancialAIController : ControllerBase
 {
