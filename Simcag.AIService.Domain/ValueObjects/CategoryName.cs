@@ -8,7 +8,7 @@ public readonly record struct CategoryName
 {
     private static readonly HashSet<string> AllowedCategories = new(StringComparer.OrdinalIgnoreCase)
     {
-        "Notebook", "Monitor", "Periférico", "Hardware", "Software", "Outro"
+        "Notebook", "Monitor", "Periférico", "Hardware","Jardinagem","Pintura","Ferragens","Material Hidráulico","Material Elétrico" ,"Software","Utensílios","Manutenção","Elétrica", "Conservação", "Segurança", "Produtos de Limpeza", "Administrativo", "Suprimentos", "Infraestrutura", "Tecnologia","Lazer", "Hidráulica", "Acessibilidade", "Gestão", "Eventos", "Conveniência", "Serviços","RH", "Taxas", "Sustentabilidade" , "Outro"
     };
 
     public string Value { get; init; }
