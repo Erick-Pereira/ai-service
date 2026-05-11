@@ -48,9 +48,14 @@ public sealed class ExpenseClassificationService : IExpenseClassificationService
         _inferenceTtl = AiServiceEnvironment.InferenceCacheTtl;
     }
 
-    public async Task<CategoryResult> ClassifyAsync(RawFinancialDataEvent financialData, CancellationToken ct)
+    private const int MaxClassificationTextChars = 8000;
+
+    public async Task<CategoryResult> ClassifyAsync(RawFinancialDataEvent financialData, CancellationToken ct, string? classificationTextOverride = null)
     {
-        var description = financialData.RawText;
+        var description = string.IsNullOrWhiteSpace(classificationTextOverride)
+            ? financialData.RawText
+            : classificationTextOverride;
+        description = TruncateForPrompt(description ?? string.Empty, MaxClassificationTextChars);
 
         // 1. Tentar IA
         if (await _ollama.IsAvailableAsync(ct))
@@ -127,6 +132,13 @@ public sealed class ExpenseClassificationService : IExpenseClassificationService
             await _inferenceCache.SetAsync(key, response, _inferenceTtl, ct);
 
         return response;
+    }
+
+    private static string TruncateForPrompt(string text, int maxChars)
+    {
+        if (text.Length <= maxChars)
+            return text;
+        return text[..maxChars];
     }
 
 }

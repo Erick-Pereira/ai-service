@@ -39,7 +39,9 @@ public sealed class SupplierExtractionService : ISupplierExtractionService
         _inferenceTtl = AiServiceEnvironment.InferenceCacheTtl;
     }
 
-    public async Task<SupplierExtractionResult> ExtractAsync(RawFinancialDataEvent financialData, CancellationToken ct)
+    private const int MaxSupplierPromptChars = 12_000;
+
+    public async Task<SupplierExtractionResult> ExtractAsync(RawFinancialDataEvent financialData, CancellationToken ct, string? supplierPromptTextOverride = null)
     {
         try
         {
@@ -47,7 +49,11 @@ public sealed class SupplierExtractionService : ISupplierExtractionService
             {
                 try
                 {
-                    var prompt = BuildExtractionPrompt(financialData.RawText);
+                    var textForPrompt = string.IsNullOrWhiteSpace(supplierPromptTextOverride)
+                        ? financialData.RawText
+                        : supplierPromptTextOverride;
+                    textForPrompt = TruncateForPrompt(textForPrompt ?? string.Empty, MaxSupplierPromptChars);
+                    var prompt = BuildExtractionPrompt(textForPrompt);
                     var rawResponse = await GenerateWithCacheAsync(prompt, ct);
 
                     if (!string.IsNullOrWhiteSpace(rawResponse))
@@ -104,6 +110,9 @@ public sealed class SupplierExtractionService : ISupplierExtractionService
                 Product: new ProductExtractionResult(null, null, Array.Empty<string>(), 0.1m, true));
         }
     }
+
+    private static string TruncateForPrompt(string text, int maxChars) =>
+        text.Length <= maxChars ? text : text[..maxChars];
 
     private static string BuildExtractionPrompt(string rawText) =>
         "You extract structured data from financial or procurement document text. Return a single JSON object with:\n" +

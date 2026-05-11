@@ -228,12 +228,24 @@ public sealed class OllamaClient : IOllamaClient
             resolved = names[0];
         }
 
+        if (resolved == null && names.Count > 0)
+        {
+            // Evita 404 em dev quando MODEL_NAME aponta para modelo não instalado (ex.: mistral:latest).
+            resolved = names.FirstOrDefault(n => n.StartsWith("llama3.1:", StringComparison.OrdinalIgnoreCase))
+                ?? names.FirstOrDefault(n => n.StartsWith("llama", StringComparison.OrdinalIgnoreCase))
+                ?? names.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).First();
+            _logger.LogWarning(
+                "MODEL_NAME '{Requested}' não encontrado no Ollama; usando fallback '{Resolved}'. Modelos instalados: {Models}. Ajuste MODEL_NAME para uma tag listada em GET /api/tags.",
+                key,
+                resolved,
+                string.Join(", ", names));
+        }
+
         if (resolved == null)
         {
             _logger.LogWarning(
-                "MODEL_NAME '{Requested}' not found in Ollama. Installed models: {Models}. Set MODEL_NAME to one of these names.",
-                key,
-                string.Join(", ", names));
+                "MODEL_NAME '{Requested}' not found in Ollama and no models listed. Set MODEL_NAME or install a model.",
+                key);
             _resolvedModelByRequest[key] = key;
             return key;
         }

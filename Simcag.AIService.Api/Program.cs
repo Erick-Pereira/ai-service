@@ -88,15 +88,13 @@ builder.Services.AddHealthChecks();
 
 var app = builder.Build();
 
-if (app.Environment.IsDevelopment())
+// Única UI: Swagger (sem fallback HTML em wwwroot).
+app.UseSwagger();
+app.UseSwaggerUI(c =>
 {
-    app.UseSwagger();
-    app.UseSwaggerUI(c =>
-    {
-        c.SwaggerEndpoint("/swagger/v1/swagger.json", "SIMCAG AI Service v1");
-        c.RoutePrefix = "swagger";
-    });
-}
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "SIMCAG AI Service v1");
+    c.RoutePrefix = "swagger";
+});
 
 // Em Development, clientes HTTP (ex.: curl na porta http) não devem levar 307 -> https (POST vira confuso / 405 no fallback).
 if (!app.Environment.IsDevelopment())
@@ -107,6 +105,5 @@ if (!app.Environment.IsDevelopment())
 app.UseAuthorization();
 app.MapControllers();
 app.MapHealthChecks("/health");
-app.MapFallbackToFile("index.html");
 
 app.Run();

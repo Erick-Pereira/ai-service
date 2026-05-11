@@ -102,7 +102,6 @@ public sealed class CategoryMatcher : ICategoryMatcher
         { "saco de lixo", "Suprimentos" },
         { "cloro", "Suprimentos" },
         { "lâmpada", "Suprimentos" },
-        { "reator", "Suprimentos" },
     
         // INFRAESTRUTURA E EQUIPAMENTOS CRÍTICOS ---
         { "gerador", "Infraestrutura" },

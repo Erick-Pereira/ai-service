@@ -59,6 +59,7 @@ public static class ServiceCollectionExtensions
         // Application Services - Financial Domain
         services.AddScoped<IExpenseClassificationService, ExpenseClassificationService>();
         services.AddScoped<ISupplierExtractionService, SupplierExtractionService>();
+        services.AddScoped<IFinancialLineItemsExtractionService, FinancialLineItemsExtractionService>();
         services.AddScoped<INameNormalizationService, NameNormalizationService>();
         services.AddScoped<IFinancialEnrichmentOrchestrator, FinancialEnrichmentOrchestrator>();
 

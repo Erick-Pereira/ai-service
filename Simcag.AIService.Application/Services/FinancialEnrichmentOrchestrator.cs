@@ -4,6 +4,8 @@ using Simcag.AIService.Application.Interfaces;
 using Simcag.Shared.Events;
 using Simcag.Shared.Messaging.Contracts;
 using Microsoft.Extensions.Logging;
+using System.Globalization;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -17,6 +19,7 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
 {
     private readonly IExpenseClassificationService _classificationService;
     private readonly ISupplierExtractionService _supplierExtractionService;
+    private readonly IFinancialLineItemsExtractionService _lineItemsExtractor;
     private readonly INameNormalizationService _normalizationService;
     private readonly ILogger<FinancialEnrichmentOrchestrator> _logger;
     private readonly IEventPublisher<EnrichedFinancialDataEvent> _enrichedPublisher;
@@ -24,12 +27,14 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
     public FinancialEnrichmentOrchestrator(
         IExpenseClassificationService classificationService,
         ISupplierExtractionService supplierExtractionService,
+        IFinancialLineItemsExtractionService lineItemsExtractor,
         INameNormalizationService normalizationService,
         ILogger<FinancialEnrichmentOrchestrator> logger,
         IEventPublisher<EnrichedFinancialDataEvent> enrichedPublisher)
     {
         _classificationService = classificationService;
         _supplierExtractionService = supplierExtractionService;
+        _lineItemsExtractor = lineItemsExtractor;
         _normalizationService = normalizationService;
         _logger = logger;
         _enrichedPublisher = enrichedPublisher;
@@ -48,9 +53,16 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
             rawData.DocumentId,
             publish);
 
-        // Sequencial: reduz pressão no Ollama (duas chamadas LLM em paralelo costumavam falhar intermitentemente).
-        var categoryResult = await _classificationService.ClassifyAsync(rawData, ct);
-        var supplierResult = await _supplierExtractionService.ExtractAsync(rawData, ct);
+        // 1) Extração estruturada de linhas (LLM) — alimenta classificação/fornecedor com texto mais limpo que o PDF bruto.
+        var lineItemsResult = await _lineItemsExtractor.ExtractAsync(rawData, ct);
+        var structuredSummary = BuildLineItemsSummary(lineItemsResult);
+        var promptOverride = ShouldUseStructuredPrompt(lineItemsResult, structuredSummary)
+            ? structuredSummary
+            : null;
+
+        // Sequencial: reduz pressão no Ollama.
+        var categoryResult = await _classificationService.ClassifyAsync(rawData, ct, promptOverride);
+        var supplierResult = await _supplierExtractionService.ExtractAsync(rawData, ct, promptOverride);
 
         // Normalizar nome do fornecedor (se não foi normalizado na extração)
         var normalizedSupplierName = supplierResult.NormalizedSupplierName;
@@ -70,9 +82,11 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
                 rawData.DocumentId);
         }
 
+        var preferAiItems = ShouldPreferAiLineItems(lineItemsResult);
         var usedFallback = categoryResult.UsedFallback
             || supplierResult.UsedFallback
-            || supplierResult.Product.UsedFallback;
+            || supplierResult.Product.UsedFallback
+            || (preferAiItems && lineItemsResult.UsedFallback);
 
         var productInfo = new ProductEnrichmentInfo
         {
@@ -83,11 +97,22 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
             UsedFallback = supplierResult.Product.UsedFallback
         };
 
-        var items = FinancialEnrichmentItemBuilder.Build(rawData, supplierResult).ToList();
+        var items = preferAiItems
+            ? lineItemsResult.Items.ToList()
+            : FinancialEnrichmentItemBuilder.Build(rawData, supplierResult).ToList();
+
+        if (preferAiItems)
+        {
+            _logger.LogInformation(
+                "Usando {Count} item(ns) extraído(s) por LLM para documento {DocumentId}",
+                items.Count,
+                rawData.DocumentId);
+        }
 
         var enrichedEvent = new EnrichedFinancialDataEvent
         {
             DocumentId = rawData.DocumentId,
+            TenantId = rawData.TenantId ?? string.Empty,
             ExpenseId = Guid.NewGuid().ToString(),
             Category = categoryResult.CategoryName,
             CategoryConfidence = categoryResult.Confidence,
@@ -115,4 +140,23 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
 
         return enrichedEvent;
     }
+
+    private static string BuildLineItemsSummary(FinancialLineItemsExtractionResult r)
+    {
+        if (r.Items.Count == 0)
+            return string.Empty;
+
+        var sb = new StringBuilder();
+        if (!string.IsNullOrWhiteSpace(r.DocumentTitle))
+            sb.AppendLine($"Título: {r.DocumentTitle.Trim()}");
+        foreach (var i in r.Items)
+            sb.AppendLine($"{i.Description}\t{i.Amount.ToString(CultureInfo.InvariantCulture)}");
+        return sb.ToString().Trim();
+    }
+
+    private static bool ShouldUseStructuredPrompt(FinancialLineItemsExtractionResult lineItems, string summary) =>
+        lineItems.Items.Count > 0 && !string.IsNullOrWhiteSpace(summary);
+
+    private static bool ShouldPreferAiLineItems(FinancialLineItemsExtractionResult r) =>
+        r.Items.Count > 0 && (!r.UsedFallback || r.Items.Count >= 2 || r.Confidence >= 0.45m);
 }

@@ -8,5 +8,8 @@ namespace Simcag.AIService.Application.Interfaces;
 /// </summary>
 public interface IExpenseClassificationService
 {
-    Task<CategoryResult> ClassifyAsync(RawFinancialDataEvent financialData, CancellationToken ct);
+    /// <param name="classificationTextOverride">
+    /// Texto enviado ao LLM em vez de <see cref="RawFinancialDataEvent.RawText"/> (ex.: linhas estruturadas extraídas por outro passo).
+    /// </param>
+    Task<CategoryResult> ClassifyAsync(RawFinancialDataEvent financialData, CancellationToken ct, string? classificationTextOverride = null);
 }

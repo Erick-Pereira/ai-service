@@ -118,4 +118,43 @@ public sealed class FinancialEnrichmentDerivationTests
         items.Should().ContainSingle();
         items[0].Amount.Should().Be(1234.56m);
     }
+
+    [Fact]
+    public void Build_UsesNineExtractedItems_FromRelatorioCondominioStylePayload()
+    {
+        var itemsPayload = new List<object>
+        {
+            new FinancialItem { Description = "Manutenção — Reparo no elevador", Amount = 2500m },
+            new FinancialItem { Description = "Manutenção — Pintura de áreas comuns", Amount = 1800m },
+            new FinancialItem { Description = "Serviços — Limpeza (empresa terceirizada)", Amount = 3200m },
+            new FinancialItem { Description = "Serviços — Segurança 24h", Amount = 5500m },
+            new FinancialItem { Description = "Utilidades — Energia elétrica", Amount = 2100m },
+            new FinancialItem { Description = "Utilidades — Água", Amount = 1300m },
+            new FinancialItem { Description = "Administrativo — Honorários do síndico", Amount = 1500m },
+            new FinancialItem { Description = "Administrativo — Sistema de gestão", Amount = 450m },
+            new FinancialItem { Description = "Outros — Fundo de reserva", Amount = 2000m }
+        };
+
+        var raw = new RawFinancialDataEvent
+        {
+            DocumentId = "relatorio-sample",
+            RawText = "blob textual ignorado para itens quando ExtractedItems vem preenchido",
+            DocumentType = "Balancete",
+            Source = "pdf",
+            FileHash = string.Empty,
+            ExtractedFields = new Dictionary<string, object?> { ["lineItemCount"] = 9 },
+            OccurredAt = DateTime.UtcNow,
+            Timestamp = DateTime.UtcNow,
+            ExtractedItems = itemsPayload
+        };
+
+        var sup = new SupplierExtractionResult("", "", null, 0.5m, true,
+            new ProductExtractionResult(null, null, Array.Empty<string>(), 0.35m, true));
+
+        var items = FinancialEnrichmentItemBuilder.Build(raw, sup);
+
+        items.Should().HaveCount(9);
+        items.Sum(i => i.Amount).Should().Be(20350m);
+        items.Should().Contain(i => i.Description.Contains("elevador", StringComparison.OrdinalIgnoreCase));
+    }
 }
