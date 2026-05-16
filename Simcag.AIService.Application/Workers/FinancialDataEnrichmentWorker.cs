@@ -4,6 +4,7 @@ using Simcag.AIService.Application.Interfaces;
 using Simcag.AIService.Application.UseCases.Financial;
 using Simcag.Shared.Events;
 using Simcag.Shared.Messaging.Contracts;
+using Simcag.Shared.Messaging.Telemetry;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.DependencyInjection;
@@ -41,38 +42,41 @@ public sealed class FinancialDataEnrichmentWorker : BackgroundService
 
         await foreach (var messageEnvelope in _eventConsumer.ReadMessagesAsync(stoppingToken))
         {
-            using var scope = _scopeFactory.CreateScope();
-            var enrichUseCase = scope.ServiceProvider.GetRequiredService<IBuildEnrichedFinancialDataEventUseCase>();
-            var idempotency = scope.ServiceProvider.GetRequiredService<IIdempotencyStore>();
-
-            try
+            using (MessagingConsumeTelemetry.BeginConsume(messageEnvelope, out _))
             {
-                var idempotencyKey = RawFinancialEventIdempotencyKeys.Build(messageEnvelope.Data);
-                if (await idempotency.HasProcessedAsync(idempotencyKey, stoppingToken))
+                using var scope = _scopeFactory.CreateScope();
+                var enrichUseCase = scope.ServiceProvider.GetRequiredService<IBuildEnrichedFinancialDataEventUseCase>();
+                var idempotency = scope.ServiceProvider.GetRequiredService<IIdempotencyStore>();
+
+                try
                 {
+                    var idempotencyKey = RawFinancialEventIdempotencyKeys.Build(messageEnvelope.Data);
+                    if (await idempotency.HasProcessedAsync(idempotencyKey, stoppingToken))
+                    {
+                        _logger.LogInformation(
+                            "Skipping already processed RawFinancialDataEvent for document {DocumentId} (key={Key})",
+                            messageEnvelope.Data.DocumentId, idempotencyKey);
+                        await _eventConsumer.AcknowledgeMessageAsync(messageEnvelope, stoppingToken);
+                        continue;
+                    }
+
+                    var enrichedEvent = await enrichUseCase.ExecuteAsync(messageEnvelope.Data, stoppingToken);
+
                     _logger.LogInformation(
-                        "Skipping already processed RawFinancialDataEvent for document {DocumentId} (key={Key})",
-                        messageEnvelope.Data.DocumentId, idempotencyKey);
+                        "Enriched financial data for document {DocumentId}: Category={Category}, Supplier={Supplier}",
+                        enrichedEvent.DocumentId, enrichedEvent.Category, enrichedEvent.Supplier.NormalizedName);
+
+                    await idempotency.MarkProcessedAsync(idempotencyKey, _idempotencyTtl, stoppingToken);
+
+                    // RabbitMQ consumer uses manual ACK. Without this, messages will be re-delivered indefinitely.
                     await _eventConsumer.AcknowledgeMessageAsync(messageEnvelope, stoppingToken);
-                    continue;
                 }
-
-                var enrichedEvent = await enrichUseCase.ExecuteAsync(messageEnvelope.Data, stoppingToken);
-
-                _logger.LogInformation(
-                    "Enriched financial data for document {DocumentId}: Category={Category}, Supplier={Supplier}",
-                    enrichedEvent.DocumentId, enrichedEvent.Category, enrichedEvent.Supplier.NormalizedName);
-
-                await idempotency.MarkProcessedAsync(idempotencyKey, _idempotencyTtl, stoppingToken);
-
-                // RabbitMQ consumer uses manual ACK. Without this, messages will be re-delivered indefinitely.
-                await _eventConsumer.AcknowledgeMessageAsync(messageEnvelope, stoppingToken);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to enrich financial data for document {DocumentId}",
-                    messageEnvelope.Data.DocumentId);
-                await _eventConsumer.RejectMessageAsync(messageEnvelope, stoppingToken);
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to enrich financial data for document {DocumentId}",
+                        messageEnvelope.Data.DocumentId);
+                    await _eventConsumer.RejectMessageAsync(messageEnvelope, stoppingToken);
+                }
             }
         }
 

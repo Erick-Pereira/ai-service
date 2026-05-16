@@ -1,8 +1,11 @@
+using System.Diagnostics;
 using Simcag.AIService.Application.Configuration;
 using Simcag.AIService.Application.Contracts;
 using Simcag.AIService.Application.Interfaces;
 using Simcag.Shared.Events;
+using Simcag.Shared.Finance;
 using Simcag.Shared.Messaging.Contracts;
+using Simcag.Shared.Telemetry;
 using Microsoft.Extensions.Logging;
 using System.Globalization;
 using System.Text;
@@ -48,21 +51,31 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
 
     private async Task<EnrichedFinancialDataEvent> RunPipelineAsync(RawFinancialDataEvent rawData, bool publish, CancellationToken ct)
     {
+        using var pipeline = SimcagActivitySources.Pipeline.StartActivity("ai.financial_enrichment", ActivityKind.Internal);
+        pipeline?.SetTag("simcag.document_id", rawData.DocumentId);
+        pipeline?.SetTag("simcag.publish", publish);
+
         _logger.LogInformation(
             "Starting enrichment pipeline for document {DocumentId} (publish={Publish})",
             rawData.DocumentId,
             publish);
 
         // 1) Extração estruturada de linhas (LLM) — alimenta classificação/fornecedor com texto mais limpo que o PDF bruto.
-        var lineItemsResult = await _lineItemsExtractor.ExtractAsync(rawData, ct);
+        FinancialLineItemsExtractionResult lineItemsResult;
+        using (SimcagActivitySources.Pipeline.StartActivity("ai.line_items.extract"))
+            lineItemsResult = await _lineItemsExtractor.ExtractAsync(rawData, ct);
         var structuredSummary = BuildLineItemsSummary(lineItemsResult);
         var promptOverride = ShouldUseStructuredPrompt(lineItemsResult, structuredSummary)
             ? structuredSummary
             : null;
 
         // Sequencial: reduz pressão no Ollama.
-        var categoryResult = await _classificationService.ClassifyAsync(rawData, ct, promptOverride);
-        var supplierResult = await _supplierExtractionService.ExtractAsync(rawData, ct, promptOverride);
+        CategoryResult categoryResult;
+        SupplierExtractionResult supplierResult;
+        using (SimcagActivitySources.Pipeline.StartActivity("ai.classify"))
+            categoryResult = await _classificationService.ClassifyAsync(rawData, ct, promptOverride);
+        using (SimcagActivitySources.Pipeline.StartActivity("ai.supplier_extract"))
+            supplierResult = await _supplierExtractionService.ExtractAsync(rawData, ct, promptOverride);
 
         // Normalizar nome do fornecedor (se não foi normalizado na extração)
         var normalizedSupplierName = supplierResult.NormalizedSupplierName;
@@ -101,6 +114,8 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
             ? lineItemsResult.Items.ToList()
             : FinancialEnrichmentItemBuilder.Build(rawData, supplierResult).ToList();
 
+        items = items.Select(FinancialLineItemSemanticNormalizer.NormalizeFinancialItem).ToList();
+
         if (preferAiItems)
         {
             _logger.LogInformation(
@@ -132,7 +147,10 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
         };
 
         if (publish)
-            await _enrichedPublisher.PublishAsync(enrichedEvent, ct);
+        {
+            using (SimcagActivitySources.Messaging.StartActivity("rabbitmq.publish.enriched"))
+                await _enrichedPublisher.PublishAsync(enrichedEvent, ct);
+        }
 
         _logger.LogInformation(
             "Enrichment completed for document {DocumentId}: Category={Category}, Supplier={Supplier}, Items={ItemCount}, Confidence={Confidence:F2}, Published={Published}",

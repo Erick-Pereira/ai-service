@@ -1,5 +1,6 @@
 using Simcag.AIService.Application.Contracts;
 using Simcag.Shared.Events;
+using Simcag.Shared.Finance;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
@@ -120,11 +121,7 @@ public static class FinancialEnrichmentItemBuilder
         switch (it)
         {
             case FinancialItem fi:
-                row = new FinancialItem
-                {
-                    Description = string.IsNullOrWhiteSpace(fi.Description) ? string.Empty : fi.Description.Trim(),
-                    Amount = fi.Amount
-                };
+                row = FinancialLineItemSemanticNormalizer.NormalizeFinancialItem(fi);
                 return true;
             case JsonElement je when je.ValueKind == JsonValueKind.Object:
                 var desc = string.Empty;
@@ -139,7 +136,25 @@ public static class FinancialEnrichmentItemBuilder
                 else if (je.TryGetProperty("Amount", out var a2))
                     TryReadJsonMoney(a2, out amt);
 
-                row = new FinancialItem { Description = desc, Amount = amt };
+                int? qty = null;
+                if (je.TryGetProperty("quantity", out var q1) && q1.ValueKind == JsonValueKind.Number && q1.TryGetInt32(out var qi) && qi > 0)
+                    qty = qi;
+                else if (je.TryGetProperty("Quantity", out var q2) && q2.ValueKind == JsonValueKind.Number && q2.TryGetInt32(out var q2i) && q2i > 0)
+                    qty = q2i;
+
+                decimal? unit = null;
+                if (je.TryGetProperty("unitPrice", out var u1) && TryReadJsonMoney(u1, out var uDec) && uDec > 0m)
+                    unit = uDec;
+                else if (je.TryGetProperty("UnitPrice", out var u2) && TryReadJsonMoney(u2, out var uDec2) && uDec2 > 0m)
+                    unit = uDec2;
+
+                row = FinancialLineItemSemanticNormalizer.NormalizeFinancialItem(new FinancialItem
+                {
+                    Description = desc,
+                    Amount = amt,
+                    Quantity = qty,
+                    UnitPrice = unit
+                });
                 return true;
             default:
                 return false;

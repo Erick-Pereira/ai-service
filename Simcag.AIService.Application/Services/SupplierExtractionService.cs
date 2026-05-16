@@ -1,7 +1,9 @@
 using Simcag.AIService.Application.Configuration;
 using Simcag.AIService.Application.Contracts;
 using Simcag.AIService.Application.Interfaces;
+using Simcag.AIService.Application.Utilities;
 using Simcag.Shared.Events;
+using Simcag.Shared.Telemetry;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using System.Threading;
@@ -152,80 +154,73 @@ public sealed class SupplierExtractionService : ISupplierExtractionService
 
     private static ParsedExtraction? TryParseExtractionResponse(string response)
     {
-        try
-        {
-            var json = StripMarkdownCodeFence(response);
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            if (!root.TryGetProperty("supplierName", out var nameProp))
-                return null;
-
-            var rawName = nameProp.GetString() ?? string.Empty;
-            string? taxId = null;
-            if (root.TryGetProperty("taxId", out var taxProp) && taxProp.ValueKind != JsonValueKind.Null)
-                taxId = taxProp.GetString();
-
-            var supplierConf = ReadDecimal(root, "supplierConfidence") ?? ReadDecimal(root, "confidence") ?? DefaultAiSupplierConfidence;
-            supplierConf = Clamp01(supplierConf);
-            var supplierFb = ReadBool(root, "supplierUsedFallback") ?? false;
-
-            var brand = ReadOptionalString(root, "brand");
-            var model = ReadOptionalString(root, "model");
-            var features = ReadStringArray(root, "features");
-            var hasProductSignal = !string.IsNullOrWhiteSpace(brand) || !string.IsNullOrWhiteSpace(model) || features.Count > 0;
-
-            var productConf = ReadDecimal(root, "productConfidence") ?? ReadDecimal(root, "confidence");
-            var productFb = ReadBool(root, "productUsedFallback");
-
-            decimal pConf;
-            bool pFb;
-            if (productConf.HasValue)
-            {
-                pConf = Clamp01(productConf.Value);
-                pFb = productFb ?? false;
-            }
-            else if (hasProductSignal)
-            {
-                pConf = DefaultAiProductConfidenceWhenPresent;
-                pFb = productFb ?? false;
-            }
-            else
-            {
-                pConf = 0.35m;
-                pFb = productFb ?? true;
-            }
-
-            var product = new ProductExtractionResult(brand, model, features, pConf, pFb);
-
-            return new ParsedExtraction(
-                RawSupplierName: rawName,
-                NormalizedSupplierName: string.Empty,
-                TaxId: taxId,
-                SupplierConfidence: supplierConf,
-                SupplierUsedFallback: supplierFb,
-                Product: product);
-        }
-        catch (JsonException)
-        {
+        if (!LlmStructuredJsonParser.TryParseJsonObject(response, "supplier_extract", out var doc))
             return null;
-        }
-    }
 
-    private static string StripMarkdownCodeFence(string response)
-    {
-        var t = response.Trim();
-        if (t.StartsWith("```", StringComparison.Ordinal))
+        using (doc)
         {
-            var firstNl = t.IndexOf('\n');
-            if (firstNl > 0)
-                t = t[(firstNl + 1)..];
-            var end = t.LastIndexOf("```", StringComparison.Ordinal);
-            if (end > 0)
-                t = t[..end];
-        }
+            try
+            {
+                var root = doc.RootElement;
 
-        return t.Trim();
+                if (!root.TryGetProperty("supplierName", out var nameProp))
+                {
+                    SimcagMeters.AiLlmParseFailures.Add(1,
+                        new KeyValuePair<string, object?>("kind", "supplier_extract"),
+                        new KeyValuePair<string, object?>("reason", "missing_supplierName"));
+                    return null;
+                }
+
+                var rawName = nameProp.GetString() ?? string.Empty;
+                string? taxId = null;
+                if (root.TryGetProperty("taxId", out var taxProp) && taxProp.ValueKind != JsonValueKind.Null)
+                    taxId = taxProp.GetString();
+
+                var supplierConf = ReadDecimal(root, "supplierConfidence") ?? ReadDecimal(root, "confidence") ?? DefaultAiSupplierConfidence;
+                supplierConf = Clamp01(supplierConf);
+                var supplierFb = ReadBool(root, "supplierUsedFallback") ?? false;
+
+                var brand = ReadOptionalString(root, "brand");
+                var model = ReadOptionalString(root, "model");
+                var features = ReadStringArray(root, "features");
+                var hasProductSignal = !string.IsNullOrWhiteSpace(brand) || !string.IsNullOrWhiteSpace(model) || features.Count > 0;
+
+                var productConf = ReadDecimal(root, "productConfidence") ?? ReadDecimal(root, "confidence");
+                var productFb = ReadBool(root, "productUsedFallback");
+
+                decimal pConf;
+                bool pFb;
+                if (productConf.HasValue)
+                {
+                    pConf = Clamp01(productConf.Value);
+                    pFb = productFb ?? false;
+                }
+                else if (hasProductSignal)
+                {
+                    pConf = DefaultAiProductConfidenceWhenPresent;
+                    pFb = productFb ?? false;
+                }
+                else
+                {
+                    pConf = 0.35m;
+                    pFb = productFb ?? true;
+                }
+
+                var product = new ProductExtractionResult(brand, model, features, pConf, pFb);
+
+                return new ParsedExtraction(
+                    RawSupplierName: rawName,
+                    NormalizedSupplierName: string.Empty,
+                    TaxId: taxId,
+                    SupplierConfidence: supplierConf,
+                    SupplierUsedFallback: supplierFb,
+                    Product: product);
+            }
+            catch (JsonException)
+            {
+                return null;
+            }
+        }
     }
 
     private static string? ReadOptionalString(JsonElement root, string name) =>

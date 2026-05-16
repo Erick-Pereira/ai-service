@@ -1,6 +1,7 @@
 using Simcag.AIService.Application.Configuration;
 using Simcag.AIService.Application.Contracts;
 using Simcag.AIService.Application.Interfaces;
+using Simcag.AIService.Application.Utilities;
 using Simcag.AIService.Domain.Entities;
 using Simcag.AIService.Domain.Services;
 using Simcag.AIService.Domain.ValueObjects;
@@ -73,7 +74,8 @@ public sealed class ExpenseClassificationService : IExpenseClassificationService
 
                 if (!string.IsNullOrWhiteSpace(rawResponse))
                 {
-                    var extractedCategory = _responseExtractor.Extract(rawResponse);
+                    var extractedCategory = TryExtractCategoryFromStructuredJson(rawResponse, categories)
+                                            ?? _responseExtractor.Extract(rawResponse);
                     var confidence = _confidenceCalculator.Calculate(rawResponse, extractedCategory);
 
                     var categoryEntity = await _categoryRepo.GetByNameAsync(extractedCategory.Value, ct);
@@ -118,6 +120,27 @@ public sealed class ExpenseClassificationService : IExpenseClassificationService
             $"Classify this financial expense into one of these categories: {categoryList}. " +
             $"Expense description: {rawText}. " +
             $"Respond with only the category name.";
+    }
+
+    private static CategoryName? TryExtractCategoryFromStructuredJson(string rawResponse, IReadOnlyCollection<string> categories)
+    {
+        if (!LlmStructuredJsonParser.TryParseJsonObject(rawResponse, "expense_category_json", out var doc))
+            return null;
+
+        using (doc)
+        {
+            var root = doc.RootElement;
+            string? cat = null;
+            if (LlmStructuredJsonParser.TryGetStringProperty(root, "category", out cat)
+                || LlmStructuredJsonParser.TryGetStringProperty(root, "Category", out cat))
+            {
+                var trimmed = cat.Trim();
+                if (categories.Any(c => string.Equals(c, trimmed, StringComparison.OrdinalIgnoreCase)))
+                    return new CategoryName(trimmed);
+            }
+        }
+
+        return null;
     }
 
     private async Task<string> GenerateWithCacheAsync(string prompt, CancellationToken ct)

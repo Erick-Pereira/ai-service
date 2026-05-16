@@ -6,11 +6,13 @@ using Simcag.Shared.Messaging;
 using Simcag.Shared.Messaging.Configuration;
 using Simcag.Shared.Messaging.Extensions;
 using Simcag.Shared.Hosting;
+using Simcag.Shared.Telemetry;
 
 DotNetEnv.Env.NoClobber().Load();
 ContainerListenConfiguration.NormalizeAspNetCoreListenUrlsInContainer();
 
 var builder = WebApplication.CreateBuilder(args);
+builder.AddSimcagDistributedTelemetry("Simcag.AIService");
 ContainerListenConfiguration.ApplyDockerListenUrls(builder);
 
 builder.Services.AddControllers();
@@ -64,6 +66,7 @@ var rabbitOptions = new RabbitMqOptions
     Password = GetEnv("RABBITMQ__PASSWORD", "RABBITMQ_PASSWORD") ?? "admin",
     VirtualHost = GetEnv("RABBITMQ__VIRTUALHOST", "RABBITMQ_VIRTUALHOST") ?? "/"
 };
+rabbitOptions.ApplyMessageSigningFromEnvironment();
 
 builder.Services.AddRabbitMqMessaging(rabbitOptions);
 
@@ -88,6 +91,8 @@ builder.Services.AddHealthChecks();
 
 var app = builder.Build();
 
+app.UseSimcagHttpCorrelationActivityTags();
+
 // Única UI: Swagger (sem fallback HTML em wwwroot).
 app.UseSwagger();
 app.UseSwaggerUI(c =>
@@ -105,5 +110,7 @@ if (!app.Environment.IsDevelopment())
 app.UseAuthorization();
 app.MapControllers();
 app.MapHealthChecks("/health");
+
+app.UseSimcagTelemetryEndpoints();
 
 app.Run();

@@ -4,7 +4,10 @@ using System.Text.Json;
 using Simcag.AIService.Application.Configuration;
 using Simcag.AIService.Application.Contracts;
 using Simcag.AIService.Application.Interfaces;
+using Simcag.AIService.Application.Utilities;
 using Simcag.Shared.Events;
+using Simcag.Shared.Finance;
+using Simcag.Shared.Telemetry;
 using Microsoft.Extensions.Logging;
 
 namespace Simcag.AIService.Application.Services;
@@ -95,11 +98,13 @@ public sealed class FinancialLineItemsExtractionService : IFinancialLineItemsExt
         sb.AppendLine(
             "You extract STRUCTURED expense LINE ITEMS from Brazilian condominium / financial documents (Portuguese).");
         sb.AppendLine("Return ONE JSON object ONLY (no markdown), with this shape:");
-        sb.AppendLine(@"  {""items"":[{""description"":""string"",""amount"":2500.50}],""documentTitle"":""string or null"",""confidence"":0.85,""usedFallback"":false}");
+        sb.AppendLine(@"  {""items"":[{""description"":""string"",""quantity"":1,""unitPrice"":820.00,""amount"":820.00}],""documentTitle"":""string or null"",""confidence"":0.85,""usedFallback"":false}");
         sb.AppendLine("Rules:");
-        sb.AppendLine("- amount: decimal number in BRL (JSON number uses dot as decimal separator). Convert Brazilian format 2.500,00 → 2500.00 , 450,00 → 450.00.");
+        sb.AppendLine("- amount (alias lineTotal): line total in BRL (JSON number with dot decimal). Convert Brazilian format 2.500,00 → 2500.00 , 450,00 → 450.00.");
+        sb.AppendLine("- quantity: integer units for that row; default 1 when a single charge.");
+        sb.AppendLine("- unitPrice: BRL per unit when the document shows unit price; omit or null if unknown.");
         sb.AppendLine("- One object per expense ROW (detail lines). Prefer detail lines over a single grand total when both exist.");
-        sb.AppendLine("- description: concise PT-BR line label (include category if helpful, e.g. \"Manutenção — Reparo elevador\").");
+        sb.AppendLine("- description: PT-BR label ONLY (no R$, no amounts, no quantity, no column headers). If OCR glued values into the text, still output the clean label you infer.");
         sb.AppendLine("- If there are NO monetary line items, return items:[], confidence low, usedFallback:true.");
         sb.AppendLine("- confidence: 0-1 for how sure you are about items[]. usedFallback:true if you guessed.");
         sb.AppendLine();
@@ -110,63 +115,104 @@ public sealed class FinancialLineItemsExtractionService : IFinancialLineItemsExt
 
     private static FinancialLineItemsExtractionResult? TryParseResponse(string response)
     {
-        try
-        {
-            var json = StripMarkdownCodeFence(response);
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            if (!root.TryGetProperty("items", out var itemsEl) || itemsEl.ValueKind != JsonValueKind.Array)
-                return null;
-
-            var list = new List<FinancialItem>();
-            foreach (var row in itemsEl.EnumerateArray())
-            {
-                if (row.ValueKind != JsonValueKind.Object)
-                    continue;
-
-                var desc = ReadString(row, "description") ?? ReadString(row, "descricao") ?? ReadString(row, "Descricao");
-                var amt = ReadAmount(row, "amount") ?? ReadAmount(row, "valor") ?? ReadAmount(row, "Valor");
-
-                desc = desc?.Trim() ?? string.Empty;
-                if (string.IsNullOrWhiteSpace(desc) && amt is null or <= 0)
-                    continue;
-                if (amt is null or <= 0)
-                    continue;
-
-                list.Add(new FinancialItem { Description = desc, Amount = amt.Value });
-            }
-
-            var title = ReadString(root, "documentTitle") ?? ReadString(root, "titulo");
-            var confidence = ReadConfidence(root);
-            var usedFb = ReadBool(root, "usedFallback") ?? false;
-
-            return new FinancialLineItemsExtractionResult(list, title, confidence, usedFb);
-        }
-        catch (JsonException)
-        {
+        if (!LlmStructuredJsonParser.TryParseJsonObject(response, "line_items_extract", out var doc))
             return null;
-        }
-    }
 
-    private static string StripMarkdownCodeFence(string response)
-    {
-        var t = response.Trim();
-        if (t.StartsWith("```", StringComparison.Ordinal))
+        using (doc)
         {
-            var firstNl = t.IndexOf('\n');
-            if (firstNl > 0)
-                t = t[(firstNl + 1)..];
-            var end = t.LastIndexOf("```", StringComparison.Ordinal);
-            if (end > 0)
-                t = t[..end];
-        }
+            try
+            {
+                var root = doc.RootElement;
 
-        return t.Trim();
+                if (!root.TryGetProperty("items", out var itemsEl) || itemsEl.ValueKind != JsonValueKind.Array)
+                {
+                    SimcagMeters.AiLlmParseFailures.Add(1,
+                        new KeyValuePair<string, object?>("kind", "line_items_extract"),
+                        new KeyValuePair<string, object?>("reason", "missing_items_array"));
+                    return null;
+                }
+
+                var list = new List<FinancialItem>();
+                foreach (var row in itemsEl.EnumerateArray())
+                {
+                    if (row.ValueKind != JsonValueKind.Object)
+                        continue;
+
+                    var desc = ReadString(row, "description") ?? ReadString(row, "descricao") ?? ReadString(row, "Descricao");
+                    var amt = ReadAmount(row, "amount")
+                        ?? ReadAmount(row, "lineTotal")
+                        ?? ReadAmount(row, "valorTotal")
+                        ?? ReadAmount(row, "valor")
+                        ?? ReadAmount(row, "Valor");
+                    var qty = ReadPositiveInt(row, "quantity", "qty", "quantidade", "Quantidade");
+                    var unit = ReadAmount(row, "unitPrice")
+                        ?? ReadAmount(row, "unit_price")
+                        ?? ReadAmount(row, "valorUnitario")
+                        ?? ReadAmount(row, "ValorUnitario")
+                        ?? ReadAmount(row, "precoUnitario");
+
+                    desc = desc?.Trim() ?? string.Empty;
+                    if (amt is null or <= 0)
+                        continue;
+
+                    var repaired = FinancialLineItemSemanticNormalizer.Repair(desc, amt.Value, qty, unit);
+                    if (string.IsNullOrWhiteSpace(repaired.CleanDescription))
+                        continue;
+
+                    list.Add(new FinancialItem
+                    {
+                        Description = repaired.CleanDescription,
+                        Amount = repaired.LineTotal,
+                        Quantity = repaired.Quantity,
+                        UnitPrice = repaired.UnitPrice
+                    });
+                }
+
+                var title = ReadString(root, "documentTitle") ?? ReadString(root, "titulo");
+                var confidence = ReadConfidence(root);
+                var usedFb = ReadBool(root, "usedFallback") ?? false;
+
+                return new FinancialLineItemsExtractionResult(list, title, confidence, usedFb);
+            }
+            catch (JsonException)
+            {
+                return null;
+            }
+        }
     }
 
     private static string? ReadString(JsonElement obj, string name) =>
         obj.TryGetProperty(name, out var el) && el.ValueKind == JsonValueKind.String ? el.GetString() : null;
+
+    private static int? ReadPositiveInt(JsonElement obj, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (!obj.TryGetProperty(name, out var el))
+                continue;
+            switch (el.ValueKind)
+            {
+                case JsonValueKind.Number when el.TryGetInt32(out var i) && i is > 0 and < 1_000_000:
+                    return i;
+                case JsonValueKind.Number when el.TryGetDecimal(out var d) && d > 0m && d == Math.Truncate(d):
+                {
+                    var n = (int)d;
+                    if (n is > 0 and < 1_000_000)
+                        return n;
+                    break;
+                }
+                case JsonValueKind.String:
+                {
+                    var s = el.GetString();
+                    if (int.TryParse(s, NumberStyles.None, CultureInfo.InvariantCulture, out var k) && k is > 0 and < 1_000_000)
+                        return k;
+                    break;
+                }
+            }
+        }
+
+        return null;
+    }
 
     private static decimal? ReadAmount(JsonElement obj, string name)
     {

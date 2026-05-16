@@ -1,55 +1,47 @@
-using Simcag.AIService.Application.Exceptions;
-using Simcag.AIService.Application.Interfaces;
-using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using Simcag.AIService.Application.Exceptions;
+using Simcag.Shared.Telemetry;
 
 namespace Simcag.AIService.Infrastructure.Clients;
 
 /// <summary>
-/// Client HTTP para integração com Ollama API.
+/// Cliente HTTP direto ao Ollama (sem fila/retries). Usado apenas pelo coordenador de inferência.
 /// </summary>
-public sealed class OllamaClient : IOllamaClient
+public sealed class OllamaHttpClient
 {
-    private readonly HttpClient _httpClient;
-    private readonly string _baseUrl;
-    private readonly ILogger<OllamaClient> _logger;
+    public const string HttpClientName = "ollama";
+
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly ILogger<OllamaHttpClient> _logger;
     private readonly ConcurrentDictionary<string, string> _resolvedModelByRequest = new(StringComparer.OrdinalIgnoreCase);
 
-    public OllamaClient(HttpClient httpClient, ILogger<OllamaClient> logger)
+    public OllamaHttpClient(IHttpClientFactory httpClientFactory, ILogger<OllamaHttpClient> logger)
     {
-        _httpClient = httpClient;
+        _httpClientFactory = httpClientFactory;
         _logger = logger;
-
-        // Env-first configuration (no appsettings). Keep backward compatibility with OLLAMA_BASE_URL.
-        // Preferred: OLLAMA_HOST (ex.: http://localhost:11434)
-        var rawUrl =
-            Environment.GetEnvironmentVariable("OLLAMA_HOST")
-            ?? Environment.GetEnvironmentVariable("OLLAMA_BASE_URL")
-            ?? "http://localhost:11434";
-        _baseUrl = rawUrl.TrimEnd('/');
-
-        // Configura BaseAddress corretamente
-        _httpClient.BaseAddress = new Uri(_baseUrl);
-
-        _logger.LogInformation("OllamaClient configured with BaseAddress: {BaseAddress}", _httpClient.BaseAddress);
     }
 
-    /// <summary>
-    /// Generates a completion from Ollama API. Note: This method may throw <see cref="AiServiceException"/>.
-    /// for various error scenarios (network errors, timeouts, server errors, etc.).
-    /// Callers should implement appropriate error handling and fallback strategies.
-    /// </summary>
-    public async Task<string> GenerateCompletionAsync(string prompt, string model = "llama3.1", CancellationToken ct = default)
+    public async Task<OllamaGenerationOutcome> GenerateCompletionRawAsync(
+        string prompt,
+        string model,
+        CancellationToken ct)
     {
-        var effectiveModel = await ResolveEffectiveModelNameAsync(model, ct);
+        var effectiveModel = await ResolveEffectiveModelNameAsync(model, ct).ConfigureAwait(false);
+        using var activity = SimcagActivitySources.AI.StartActivity("ollama.http.generate", ActivityKind.Client);
+        activity?.SetTag("ai.model.requested", model);
+        activity?.SetTag("ai.model.effective", effectiveModel);
+
         try
         {
+            using var http = _httpClientFactory.CreateClient(HttpClientName);
             var request = new OllamaRequest(effectiveModel, prompt, false);
-            var response = await _httpClient.PostAsJsonAsync("api/generate", request, ct);
-            var raw = await response.Content.ReadAsStringAsync(ct);
+            var response = await http.PostAsJsonAsync("api/generate", request, ct).ConfigureAwait(false);
+            var raw = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogError(
@@ -65,44 +57,57 @@ public sealed class OllamaClient : IOllamaClient
                 response.EnsureSuccessStatusCode();
             }
 
-            var jsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-            var result = JsonSerializer.Deserialize<OllamaResponse>(raw, jsonOptions);
-            return result?.Response ?? string.Empty;
+            using var doc = JsonDocument.Parse(raw);
+            var root = doc.RootElement;
+            var text = root.TryGetProperty("response", out var respEl) && respEl.ValueKind == JsonValueKind.String
+                ? respEl.GetString() ?? string.Empty
+                : string.Empty;
+
+            int? promptEval = null;
+            if (root.TryGetProperty("prompt_eval_count", out var pe) && pe.ValueKind == JsonValueKind.Number && pe.TryGetInt32(out var pi))
+                promptEval = pi;
+
+            int? evalCount = null;
+            if (root.TryGetProperty("eval_count", out var ev) && ev.ValueKind == JsonValueKind.Number && ev.TryGetInt32(out var ei))
+                evalCount = ei;
+
+            activity?.SetStatus(ActivityStatusCode.Ok);
+            return new OllamaGenerationOutcome(text, promptEval, evalCount);
         }
         catch (HttpRequestException ex) when (ex.StatusCode.HasValue && (int)ex.StatusCode.Value >= 500)
         {
-            // Server error from Ollama (body já logado acima quando a resposta não foi sucesso)
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
             _logger.LogError(ex, "Ollama server error for model {EffectiveModel} (requested {RequestedModel})", effectiveModel, model);
             throw new AiServiceException("AI service encountered an error", ex);
         }
         catch (HttpRequestException ex) when (ex.StatusCode.HasValue && (int)ex.StatusCode.Value == 404)
         {
-            // Allow retry after modelo instalado / tags alteradas
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
             _resolvedModelByRequest.TryRemove(NormalizeModelKey(model), out _);
-            // Model not found or wrong endpoint
             _logger.LogError(ex, "Ollama endpoint or model not found: effective {EffectiveModel}, requested {RequestedModel}", effectiveModel, model);
             throw new AiServiceException("AI model not found", ex);
         }
         catch (HttpRequestException ex)
         {
-            // Network or connectivity issues
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
             _logger.LogError(ex, "Network error connecting to Ollama for model {EffectiveModel} (requested {RequestedModel})", effectiveModel, model);
             throw new AiServiceException("Unable to connect to AI service", ex);
         }
         catch (TaskCanceledException ex)
         {
-            // Timeout
+            activity?.SetStatus(ActivityStatusCode.Error, "timeout");
             _logger.LogError(ex, "Request to Ollama timed out for model {EffectiveModel} (requested {RequestedModel})", effectiveModel, model);
             throw new AiServiceException("AI service request timed out", ex);
         }
         catch (JsonException ex)
         {
-            // Deserialization error
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
             _logger.LogError(ex, "Invalid response format from Ollama for model {EffectiveModel} (requested {RequestedModel})", effectiveModel, model);
             throw new AiServiceException("Received invalid response from AI service", ex);
         }
         catch (Exception ex)
         {
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
             _logger.LogError(ex, "Unexpected error generating completion from Ollama for model {EffectiveModel} (requested {RequestedModel})", effectiveModel, model);
             throw new AiServiceException("AI service is currently unavailable", ex);
         }
@@ -112,7 +117,8 @@ public sealed class OllamaClient : IOllamaClient
     {
         try
         {
-            var response = await _httpClient.GetAsync("api/tags", ct);
+            using var http = _httpClientFactory.CreateClient(HttpClientName);
+            var response = await http.GetAsync("api/tags", ct).ConfigureAwait(false);
             return response.IsSuccessStatusCode;
         }
         catch (Exception ex)
@@ -122,17 +128,17 @@ public sealed class OllamaClient : IOllamaClient
         }
     }
 
-    /// <inheritdoc />
     public async Task<IReadOnlyList<string>> ListInstalledModelNamesAsync(CancellationToken ct = default)
     {
         try
         {
-            var tagsResponse = await _httpClient.GetAsync("api/tags", ct);
+            using var http = _httpClientFactory.CreateClient(HttpClientName);
+            var tagsResponse = await http.GetAsync("api/tags", ct).ConfigureAwait(false);
             if (!tagsResponse.IsSuccessStatusCode)
                 return Array.Empty<string>();
 
-            await using var stream = await tagsResponse.Content.ReadAsStreamAsync(ct);
-            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+            await using var stream = await tagsResponse.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
             return ParseModelNames(doc);
         }
         catch (Exception ex)
@@ -142,19 +148,6 @@ public sealed class OllamaClient : IOllamaClient
         }
     }
 
-    // Note: There's a potential TOCTOU (Time-of-check Time-of-use) race condition
-    // between IsAvailableAsync and GenerateCompletionAsync. Even if IsAvailableAsync
-    // returns true, the Ollama service could become unavailable before GenerateCompletionAsync
-    // is called. Callers should handle exceptions from GenerateCompletionAsync gracefully
-    // and implement fallback strategies, as done in ExpenseClassificationService and 
-    // SupplierExtractionService.
-    private record OllamaRequest(string Model, string Prompt, bool Stream);
-    private record OllamaResponse(string Response);
-
-    /// <summary>
-    /// Ollama lista modelos com tag completa (ex.: <c>llama3.1:latest</c>). <c>MODEL_NAME=llama3.1</c> costuma 404 até existir correspondência exata.
-    /// Resolve via <c>GET /api/tags</c>: match exato, depois <c>{base}:latest</c>, depois qualquer tag com o mesmo prefixo antes de <c>:</c>.
-    /// </summary>
     private static string NormalizeModelKey(string? requested) =>
         string.IsNullOrWhiteSpace(requested) ? "llama3.1" : requested.Trim();
 
@@ -167,15 +160,16 @@ public sealed class OllamaClient : IOllamaClient
         List<string> names;
         try
         {
-            var tagsResponse = await _httpClient.GetAsync("api/tags", ct);
+            using var http = _httpClientFactory.CreateClient(HttpClientName);
+            var tagsResponse = await http.GetAsync("api/tags", ct).ConfigureAwait(false);
             if (!tagsResponse.IsSuccessStatusCode)
             {
                 _resolvedModelByRequest[key] = key;
                 return key;
             }
 
-            await using var stream = await tagsResponse.Content.ReadAsStreamAsync(ct);
-            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+            await using var stream = await tagsResponse.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
             names = ParseModelNames(doc);
         }
         catch (Exception ex)
@@ -196,7 +190,6 @@ public sealed class OllamaClient : IOllamaClient
 
         string? resolved = names.FirstOrDefault(n => Eq(n, key));
 
-        // Base sem tag (ex.: llama3.1): preferir explicitamente :latest entre variantes llama3.1:* (evita pegar :8b só por ordem na API).
         if (resolved == null && !key.Contains(':', StringComparison.Ordinal))
         {
             var variants = names
@@ -230,7 +223,6 @@ public sealed class OllamaClient : IOllamaClient
 
         if (resolved == null && names.Count > 0)
         {
-            // Evita 404 em dev quando MODEL_NAME aponta para modelo não instalado (ex.: mistral:latest).
             resolved = names.FirstOrDefault(n => n.StartsWith("llama3.1:", StringComparison.OrdinalIgnoreCase))
                 ?? names.FirstOrDefault(n => n.StartsWith("llama", StringComparison.OrdinalIgnoreCase))
                 ?? names.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).First();
@@ -252,6 +244,9 @@ public sealed class OllamaClient : IOllamaClient
 
         if (!Eq(resolved, key))
         {
+            SimcagMeters.AiModelFallbacks.Add(1,
+                new KeyValuePair<string, object?>("requested", key),
+                new KeyValuePair<string, object?>("effective", resolved));
             _logger.LogInformation("Ollama model name resolved: {Requested} -> {Resolved}", key, resolved);
         }
 
@@ -277,4 +272,8 @@ public sealed class OllamaClient : IOllamaClient
 
         return list;
     }
+
+    private record OllamaRequest(string Model, string Prompt, bool Stream);
 }
+
+public readonly record struct OllamaGenerationOutcome(string Text, int? PromptEvalCount, int? EvalCount);
