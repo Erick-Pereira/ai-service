@@ -8,10 +8,10 @@ namespace Simcag.AIService.Application.Configuration;
 public sealed class OllamaResilienceOptions
 {
     /// <summary>Workers que drenam a fila (concorrência real contra o Ollama).</summary>
-    public int MaxConcurrency { get; set; } = 2;
+    public int MaxConcurrency { get; set; } = 4; // Aumentado para melhor throughput
 
     /// <summary>Capacidade da fila interna (backpressure quando cheia).</summary>
-    public int QueueCapacity { get; set; } = 64;
+    public int QueueCapacity { get; set; } = 256; // Aumentado de 64 para 256 (conforme plano)
 
     /// <summary>Timeout por tentativa HTTP (linked cancellation), segundos.</summary>
     public int PerAttemptTimeoutSeconds { get; set; } = 90;
@@ -20,16 +20,24 @@ public sealed class OllamaResilienceOptions
     public int HttpClientTimeoutSeconds { get; set; } = 600;
 
     /// <summary>Retentativas após a primeira tentativa (total = 1 + MaxRetries).</summary>
-    public int MaxRetries { get; set; } = 2;
+    public int MaxRetries { get; set; } = 3; // Aumentado de 2 para 3 para maior resiliência
 
     public int RetryBaseDelayMilliseconds { get; set; } = 500;
 
-    public int CircuitFailureThreshold { get; set; } = 5;
+    /// <summary>Circuit breaker: abre após N falhas consecutivas.</summary>
+    public int CircuitFailureThreshold { get; set; } = 8; // Aumentado de 5 para 8 (evita falsos positivos)
 
-    public int CircuitOpenSeconds { get; set; } = 60;
+    /// <summary>Tempo que o circuit breaker fica aberto (segundos).</summary>
+    public int CircuitOpenSeconds { get; set; } = 120; // Aumentado de 60 para 120 (dá tempo de recovery)
 
     /// <summary>Modelo operacional de fallback após esgotar retentativas no modelo pedido (ex.: <c>llama3.2:3b</c>).</summary>
     public string? OperationalFallbackModel { get; set; }
+
+    /// <summary>
+    /// Modelo sugerido para PT-BR (configurar via OLLAMA_MODEL_NAME env var). 
+    /// Recomenda-se usar variante específica do Brasil se disponível.
+    /// </summary>
+    public static string SuggestedPtbModel => "llama3.1:8b"; // Ou mistral-nemo-instruct-2410 para PT-BR
 
     public static OllamaResilienceOptions FromEnvironment()
     {

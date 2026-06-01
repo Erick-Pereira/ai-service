@@ -20,6 +20,8 @@ public sealed class NarrateOperationalInsightsUseCase : INarrateOperationalInsig
     private const int MaxItems = 12;
     private const int MaxFieldChars = 600;
     private const int MaxEvidenceJsonChars = 1200;
+    /// <summary>Limite de espera pela narração LLM antes de devolver fallback determinístico.</summary>
+    private const int NarrationTimeoutSeconds = 45;
 
     private readonly IOllamaClient _ollama;
     private readonly ILogger<NarrateOperationalInsightsUseCase> _logger;
@@ -40,7 +42,10 @@ public sealed class NarrateOperationalInsightsUseCase : INarrateOperationalInsig
             throw new AiServiceException($"No máximo {MaxItems} insights por pedido.");
 
         if (!await _ollama.IsAvailableAsync(ct).ConfigureAwait(false))
-            throw new AiServiceException("Motor de IA (Ollama) indisponível.");
+        {
+            _logger.LogWarning("Ollama indisponível — narração determinística.");
+            return BuildDeterministicFallback(input, llmUnavailable: true);
+        }
 
         var payload = BuildPayloadJson(input);
         var prompt = BuildPrompt(input.Language ?? "pt", payload);
@@ -51,18 +56,20 @@ public sealed class NarrateOperationalInsightsUseCase : INarrateOperationalInsig
         string raw;
         try
         {
-            raw = await _ollama.GenerateCompletionAsync(prompt, _modelName, ct).ConfigureAwait(false);
+            using var llmCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            llmCts.CancelAfter(TimeSpan.FromSeconds(NarrationTimeoutSeconds));
+            raw = await _ollama.GenerateCompletionAsync(prompt, _modelName, llmCts.Token).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Falha ao gerar narração de insights.");
-            throw new AiServiceException("Falha ao contactar o modelo de IA.");
+            _logger.LogWarning(ex, "Falha ao gerar narração de insights — fallback determinístico.");
+            return BuildDeterministicFallback(input, llmUnavailable: true);
         }
 
         if (!LlmStructuredJsonParser.TryParseJsonObject(raw, "operational_insights_narrative", out var doc))
         {
-            _logger.LogWarning("Resposta LLM sem JSON válido para narração de insights.");
-            throw new AiServiceException("Resposta do modelo não pôde ser interpretada.");
+            _logger.LogWarning("Resposta LLM sem JSON válido para narração de insights — fallback determinístico.");
+            return BuildDeterministicFallback(input, llmUnavailable: false);
         }
 
         try
@@ -74,8 +81,8 @@ public sealed class NarrateOperationalInsightsUseCase : INarrateOperationalInsig
         }
         catch (JsonException ex)
         {
-            _logger.LogWarning(ex, "JSON de narração incompleto.");
-            throw new AiServiceException("Estrutura da resposta do modelo inválida.");
+            _logger.LogWarning(ex, "JSON de narração incompleto — fallback determinístico.");
+            return BuildDeterministicFallback(input, llmUnavailable: false);
         }
     }
 
@@ -171,6 +178,43 @@ public sealed class NarrateOperationalInsightsUseCase : INarrateOperationalInsig
         if (!el.TryGetProperty(name, out var p) || p.ValueKind != JsonValueKind.String)
             return "";
         return Truncate(p.GetString() ?? "", MaxFieldChars);
+    }
+
+    private static NarrateOperationalInsightsResult BuildDeterministicFallback(
+        NarrateOperationalInsightsInput input,
+        bool llmUnavailable)
+    {
+        var highlights = input.Items
+            .Take(5)
+            .Select(i => string.IsNullOrWhiteSpace(i.SimpleExplanation) ? i.Title : i.SimpleExplanation)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .ToList();
+
+        var exec = highlights.Count > 0
+            ? (llmUnavailable
+                ? "Narração automática (IA indisponível ou demorada): "
+                : "Narração automática (resposta IA incompleta): ")
+              + string.Join(" · ", highlights)
+            : llmUnavailable
+                ? "IA temporariamente indisponível. Utilize o resumo executivo determinístico acima."
+                : "Não foi possível interpretar a resposta da IA. Utilize o resumo executivo determinístico acima.";
+
+        var items = input.Items
+            .Select(i => new NarrateOperationalInsightItemNarrative
+            {
+                Id = i.Id,
+                SimpleExplanation = string.IsNullOrWhiteSpace(i.SimpleExplanation) ? i.Summary : i.SimpleExplanation,
+                WhyItMatters = "",
+                WhatToDo = "",
+                DetailedExplanation = ""
+            })
+            .ToList();
+
+        return new NarrateOperationalInsightsResult
+        {
+            ExecutiveSummary = Truncate(exec, 1200),
+            Items = items
+        };
     }
 
     private static string Truncate(string s, int max)

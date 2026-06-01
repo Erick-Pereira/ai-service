@@ -96,7 +96,7 @@ public sealed class FinancialLineItemsExtractionService : IFinancialLineItemsExt
     {
         var sb = new StringBuilder();
         sb.AppendLine(
-            "You extract STRUCTURED expense LINE ITEMS from Brazilian condominium / financial documents (Portuguese).");
+            "You extract STRUCTURED expense LINE ITEMS from Brazilian financial documents (NF-e, NFS-e, recibos em PT-BR). ");
         sb.AppendLine("Return ONE JSON object ONLY (no markdown), with this shape:");
         sb.AppendLine(@"  {""items"":[{""description"":""string"",""quantity"":1,""unitPrice"":820.00,""amount"":820.00}],""documentTitle"":""string or null"",""confidence"":0.85,""usedFallback"":false}");
         sb.AppendLine("Rules:");
@@ -104,9 +104,10 @@ public sealed class FinancialLineItemsExtractionService : IFinancialLineItemsExt
         sb.AppendLine("- quantity: integer units for that row; default 1 when a single charge.");
         sb.AppendLine("- unitPrice: BRL per unit when the document shows unit price; omit or null if unknown.");
         sb.AppendLine("- One object per expense ROW (detail lines). Prefer detail lines over a single grand total when both exist.");
-        sb.AppendLine("- description: PT-BR label ONLY (no R$, no amounts, no quantity, no column headers). If OCR glued values into the text, still output the clean label you infer.");
+        sb.AppendLine("- description: PT-BR label ONLY (no R$, no amounts, no quantity, no column headers). Clean labels like 'Taxa Condominial', 'Manutenção de Elevadores'. If OCR glued values into the text, still output the clean label you infer.");
         sb.AppendLine("- If there are NO monetary line items, return items:[], confidence low, usedFallback:true.");
         sb.AppendLine("- confidence: 0-1 for how sure you are about items[]. usedFallback:true if you guessed.");
+        sb.AppendLine("- documentTitle: extract from 'Número da Nota', 'Nº Documento', or similar fields");
         sb.AppendLine();
         sb.AppendLine("Document text:");
         sb.Append(documentText);

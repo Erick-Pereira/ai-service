@@ -5,7 +5,9 @@ using Simcag.Shared.Events;
 using Simcag.Shared.Messaging;
 using Simcag.Shared.Messaging.Configuration;
 using Simcag.Shared.Messaging.Extensions;
+using Simcag.Shared.ErrorHandling;
 using Simcag.Shared.Hosting;
+using Simcag.Shared.Security;
 using Simcag.Shared.Telemetry;
 
 DotNetEnv.Env.NoClobber().Load();
@@ -14,6 +16,8 @@ ContainerListenConfiguration.NormalizeAspNetCoreListenUrlsInContainer();
 var builder = WebApplication.CreateBuilder(args);
 builder.AddSimcagDistributedTelemetry("Simcag.AIService");
 ContainerListenConfiguration.ApplyDockerListenUrls(builder);
+
+var isTesting = builder.Environment.IsEnvironment("Testing");
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -57,40 +61,43 @@ static string? GetEnv(params string[] keys)
     return null;
 }
 
-// RabbitMQ
-var rabbitOptions = new RabbitMqOptions
+// RabbitMQ (omitido em Testing para WebApplicationFactory)
+if (!isTesting)
 {
-    Host = GetEnv("RABBITMQ__HOST", "RABBITMQ_HOST") ?? "localhost",
-    Port = int.Parse(GetEnv("RABBITMQ__PORT", "RABBITMQ_PORT") ?? "5672"),
-    UserName = GetEnv("RABBITMQ__USERNAME", "RABBITMQ_USERNAME") ?? "admin",
-    Password = GetEnv("RABBITMQ__PASSWORD", "RABBITMQ_PASSWORD") ?? "admin",
-    VirtualHost = GetEnv("RABBITMQ__VIRTUALHOST", "RABBITMQ_VIRTUALHOST") ?? "/"
-};
-rabbitOptions.ApplyMessageSigningFromEnvironment();
+    var rabbitOptions = new RabbitMqOptions
+    {
+        Host = GetEnv("RABBITMQ__HOST", "RABBITMQ_HOST") ?? "localhost",
+        Port = int.Parse(GetEnv("RABBITMQ__PORT", "RABBITMQ_PORT") ?? "5672"),
+        UserName = GetEnv("RABBITMQ__USERNAME", "RABBITMQ_USERNAME") ?? "guest",
+        Password = GetEnv("RABBITMQ__PASSWORD", "RABBITMQ_PASSWORD") ?? "guest",
+        VirtualHost = GetEnv("RABBITMQ__VIRTUALHOST", "RABBITMQ_VIRTUALHOST") ?? "/"
+    };
+    rabbitOptions.ApplyMessageSigningFromEnvironment();
 
-builder.Services.AddRabbitMqMessaging(rabbitOptions);
+    builder.Services.AddRabbitMqMessaging(rabbitOptions);
 
-// Exchange direct de eventos de domínio (não usar EventBusConstants.ExchangeName = price-monitoring-exchange).
-// Fallback literal: compatível com pacotes Simcag.Shared antigos sem DefaultEventsExchange / GetEventsExchangeName.
-const string defaultDomainEventsExchange = "events";
-var eventsExchangeFromEnv = GetEnv("RABBITMQ__EVENTS_EXCHANGE", "RABBITMQ_EVENTS_EXCHANGE");
-var eventsExchange = string.IsNullOrWhiteSpace(eventsExchangeFromEnv)
-    ? defaultDomainEventsExchange
-    : eventsExchangeFromEnv.Trim();
+    const string defaultDomainEventsExchange = "events";
+    var eventsExchangeFromEnv = GetEnv("RABBITMQ__EVENTS_EXCHANGE", "RABBITMQ_EVENTS_EXCHANGE");
+    var eventsExchange = string.IsNullOrWhiteSpace(eventsExchangeFromEnv)
+        ? defaultDomainEventsExchange
+        : eventsExchangeFromEnv.Trim();
 
-// Consumers
-builder.Services.AddRabbitMqEventConsumer<RawFinancialDataEvent>(EventNames.RawFinancialData, eventsExchange);
+    builder.Services.AddRabbitMqEventConsumer<RawFinancialDataEvent>(EventNames.RawFinancialData, eventsExchange);
+    builder.Services.AddRabbitMqEventPublisher<EnrichedFinancialDataEvent>(eventsExchange);
+    builder.Services.AddHostedService<FinancialDataEnrichmentWorker>();
+}
 
-// Publishers
-builder.Services.AddRabbitMqEventPublisher<EnrichedFinancialDataEvent>(eventsExchange);
+builder.Services.AddSimcagGatewayAuthentication(builder.Environment);
 
-// Worker
-builder.Services.AddHostedService<FinancialDataEnrichmentWorker>();
+builder.Services.AddHealthChecks().AddSimcagLiveSelfCheck();
 
-builder.Services.AddHealthChecks();
+builder.Services.AddSimcagProblemDetails();
 
 var app = builder.Build();
 
+app.ValidateSimcagGatewayTrustAtStartup();
+
+app.UseSimcagExceptionHandler();
 app.UseSimcagHttpCorrelationActivityTags();
 
 // Única UI: Swagger (sem fallback HTML em wwwroot).
@@ -102,15 +109,17 @@ app.UseSwaggerUI(c =>
 });
 
 // Em Development, clientes HTTP (ex.: curl na porta http) não devem levar 307 -> https (POST vira confuso / 405 no fallback).
-if (!app.Environment.IsDevelopment())
-{
+if (!isTesting)
     app.UseHttpsRedirection();
-}
-
+app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
-app.MapHealthChecks("/health");
+app.MapSimcagHealthChecks();
 
 app.UseSimcagTelemetryEndpoints();
 
 app.Run();
+
+public partial class Program
+{
+}

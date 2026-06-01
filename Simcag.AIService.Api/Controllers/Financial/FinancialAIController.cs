@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Simcag.AIService.Api.Mapping;
 using Simcag.AIService.Api.Models.Financial;
@@ -18,6 +19,7 @@ namespace Simcag.AIService.Api.Controllers.Financial;
 /// </summary>
 [ApiController]
 [Route("api/ai")]
+[Authorize]
 public sealed class FinancialAIController : ControllerBase
 {
     private readonly IClassifyExpenseUseCase _classifyExpense;
@@ -38,6 +40,62 @@ public sealed class FinancialAIController : ControllerBase
         _normalizeSupplierName = normalizeSupplierName;
         _buildEnrichedEvent = buildEnrichedEvent;
         _previewEnrichment = previewEnrichment;
+    }
+
+    /// <summary>Processa um único item em lote para classificação de despesas, processando o pipeline completo e coletando resultados.</summary>
+    private async Task<ClassifyBatchItemResult> ProcessClassifyBatchItemAsync(
+        string id, string rawText, IClassifyExpenseUseCase classifyExpense, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(rawText))
+            return new ClassifyBatchItemResult(id, false, "Raw text is required", null);
+        
+        try
+        {
+            var financialEvent = FinancialRawEventFactory.FromClassifyOrExtract(rawText, null, null);
+            var result = await classifyExpense.ExecuteAsync(financialEvent, ct);
+            return new ClassifyBatchItemResult(id, true, null, result);
+        }
+        catch (AiServiceException ex)
+        {
+            return new ClassifyBatchItemResult(id, false, ex.Message, null);
+        }
+    }
+
+    /// <summary>Processa um único item em lote para extração de fornecedores.</summary>
+    private async Task<ExtractBatchItemResult> ProcessExtractBatchItemAsync(
+        string id, string rawText, IExtractSupplierUseCase extractSupplier, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(rawText))
+            return new ExtractBatchItemResult(id, false, "Raw text is required", null);
+        
+        try
+        {
+            var financialEvent = FinancialRawEventFactory.FromClassifyOrExtract(rawText, null, null);
+            var result = await extractSupplier.ExecuteAsync(financialEvent, ct);
+            return new ExtractBatchItemResult(id, true, null, result);
+        }
+        catch (AiServiceException ex)
+        {
+            return new ExtractBatchItemResult(id, false, ex.Message, null);
+        }
+    }
+
+    /// <summary>Processa um único item em lote para normalização de nomes.</summary>
+    private async Task<NormalizeBatchItemResult> ProcessNormalizeBatchItemAsync(
+        string id, string rawText, INormalizeSupplierNameUseCase normalizeSupplierName, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(rawText))
+            return new NormalizeBatchItemResult(id, false, "Raw text is required", null);
+        
+        try
+        {
+            var result = await normalizeSupplierName.ExecuteAsync(rawText, ct);
+            return new NormalizeBatchItemResult(id, true, null, result);
+        }
+        catch (AiServiceException ex)
+        {
+            return new NormalizeBatchItemResult(id, false, ex.Message, null);
+        }
     }
 
     [HttpPost("categorize")]
@@ -70,30 +128,14 @@ public sealed class FinancialAIController : ControllerBase
         var results = new List<ClassifyBatchItemResult>(request.Items.Count);
         foreach (var item in request.Items)
         {
-            if (string.IsNullOrWhiteSpace(item.RawText))
-            {
-                results.Add(new ClassifyBatchItemResult(item.Id, false, "Raw text is required", null));
-                continue;
-            }
-
-            try
-            {
-                var ev = FinancialRawEventFactory.FromClassifyOrExtract(item.RawText, item.DocumentType, item.Source);
-                var cat = await _classifyExpense.ExecuteAsync(ev, ct);
-                results.Add(new ClassifyBatchItemResult(item.Id, true, null, cat));
-            }
-            catch (AiServiceException ex)
-            {
-                results.Add(new ClassifyBatchItemResult(item.Id, false, ex.Message, null));
-            }
+            results.Add(await ProcessClassifyBatchItemAsync(
+                item.Id, item.RawText, _classifyExpense, ct));
         }
 
         return Ok(ApiResponse<IReadOnlyList<ClassifyBatchItemResult>>.Ok(results));
     }
 
-    /// <summary>
-    /// Extração a partir do texto: fornecedor (nome, documento) + produto/serviço (<c>Product</c>: marca, modelo, funcionalidades, confiança e fallback).
-    /// </summary>
+    /// <summary>Extração a partir do texto: fornecedor (nome, documento) + produto/serviço.</summary>
     [HttpPost("extract")]
     [HttpPost("extract-supplier")]
     public async Task<IActionResult> ExtractSupplier([FromBody] ExtractSupplierRequest request, CancellationToken ct)
@@ -124,22 +166,8 @@ public sealed class FinancialAIController : ControllerBase
         var results = new List<ExtractBatchItemResult>(request.Items.Count);
         foreach (var item in request.Items)
         {
-            if (string.IsNullOrWhiteSpace(item.RawText))
-            {
-                results.Add(new ExtractBatchItemResult(item.Id, false, "Raw text is required", null));
-                continue;
-            }
-
-            try
-            {
-                var ev = FinancialRawEventFactory.FromClassifyOrExtract(item.RawText, item.DocumentType, item.Source);
-                var sup = await _extractSupplier.ExecuteAsync(ev, ct);
-                results.Add(new ExtractBatchItemResult(item.Id, true, null, sup));
-            }
-            catch (AiServiceException ex)
-            {
-                results.Add(new ExtractBatchItemResult(item.Id, false, ex.Message, null));
-            }
+            results.Add(await ProcessExtractBatchItemAsync(
+                item.Id, item.RawText, _extractSupplier, ct));
         }
 
         return Ok(ApiResponse<IReadOnlyList<ExtractBatchItemResult>>.Ok(results));
@@ -174,27 +202,13 @@ public sealed class FinancialAIController : ControllerBase
         var results = new List<NormalizeBatchItemResult>(request.Items.Count);
         foreach (var item in request.Items)
         {
-            if (string.IsNullOrWhiteSpace(item.RawName))
-            {
-                results.Add(new NormalizeBatchItemResult(item.Id, false, "Raw name is required", null));
-                continue;
-            }
-
-            try
-            {
-                var norm = await _normalizeSupplierName.ExecuteAsync(item.RawName, ct);
-                results.Add(new NormalizeBatchItemResult(item.Id, true, null, norm));
-            }
-            catch (AiServiceException ex)
-            {
-                results.Add(new NormalizeBatchItemResult(item.Id, false, ex.Message, null));
-            }
+            results.Add(await ProcessNormalizeBatchItemAsync(
+                item.Id, item.RawName, _normalizeSupplierName, ct));
         }
 
         return Ok(ApiResponse<IReadOnlyList<NormalizeBatchItemResult>>.Ok(results));
     }
 
-    /// <summary>Executa o pipeline completo e publica <see cref="EnrichedFinancialDataEvent"/> no exchange configurado.</summary>
     [HttpPost("process")]
     public async Task<IActionResult> Process([FromBody] EnrichRequest request, CancellationToken ct)
     {

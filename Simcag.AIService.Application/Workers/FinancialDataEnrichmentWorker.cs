@@ -36,12 +36,15 @@ public sealed class FinancialDataEnrichmentWorker : BackgroundService
         _idempotencyTtl = AiServiceEnvironment.IdempotencyTtl;
     }
 
+    private static string GetCorrelationId() => System.Guid.NewGuid().ToString("N").Substring(0, 16);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Starting FinancialDataEnrichmentWorker - listening for RawFinancialDataEvent");
 
         await foreach (var messageEnvelope in _eventConsumer.ReadMessagesAsync(stoppingToken))
         {
+            var correlationId = GetCorrelationId();
             using (MessagingConsumeTelemetry.BeginConsume(messageEnvelope, out _))
             {
                 using var scope = _scopeFactory.CreateScope();
@@ -54,7 +57,8 @@ public sealed class FinancialDataEnrichmentWorker : BackgroundService
                     if (await idempotency.HasProcessedAsync(idempotencyKey, stoppingToken))
                     {
                         _logger.LogInformation(
-                            "Skipping already processed RawFinancialDataEvent for document {DocumentId} (key={Key})",
+                            "[{CorrelationId}] Skipping already processed document {DocumentId} (key={Key})",
+                            correlationId,
                             messageEnvelope.Data.DocumentId, idempotencyKey);
                         await _eventConsumer.AcknowledgeMessageAsync(messageEnvelope, stoppingToken);
                         continue;
@@ -63,7 +67,8 @@ public sealed class FinancialDataEnrichmentWorker : BackgroundService
                     var enrichedEvent = await enrichUseCase.ExecuteAsync(messageEnvelope.Data, stoppingToken);
 
                     _logger.LogInformation(
-                        "Enriched financial data for document {DocumentId}: Category={Category}, Supplier={Supplier}",
+                        "[{CorrelationId}] Enriched financial data for document {DocumentId}: Category={Category}, Supplier={Supplier}",
+                        correlationId,
                         enrichedEvent.DocumentId, enrichedEvent.Category, enrichedEvent.Supplier.NormalizedName);
 
                     await idempotency.MarkProcessedAsync(idempotencyKey, _idempotencyTtl, stoppingToken);
@@ -73,8 +78,8 @@ public sealed class FinancialDataEnrichmentWorker : BackgroundService
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Failed to enrich financial data for document {DocumentId}",
-                        messageEnvelope.Data.DocumentId);
+                    _logger.LogError(ex, "[{CorrelationId}] Failed to enrich financial data for document {DocumentId}",
+                        correlationId, messageEnvelope.Data.DocumentId);
                     await _eventConsumer.RejectMessageAsync(messageEnvelope, stoppingToken);
                 }
             }
@@ -82,5 +87,4 @@ public sealed class FinancialDataEnrichmentWorker : BackgroundService
 
         _logger.LogInformation("FinancialDataEnrichmentWorker stopped");
     }
-
 }

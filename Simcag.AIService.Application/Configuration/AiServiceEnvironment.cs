@@ -29,5 +29,25 @@ public static class AiServiceEnvironment
             CultureInfo.InvariantCulture,
             out var v) && v is > 0m and <= 1m
             ? v
-            : 0.55m;
+            : 0.75m; // Aumentado de 0.55m para 0.75m - conformidade com TCC (Fase 2) - auditoria rigorosa
+
+    /// <summary>Confidence score mínimo para fallback rule-based classification.</summary>
+    public static decimal FallbackClassificationConfidence =>
+        decimal.TryParse(
+            Environment.GetEnvironmentVariable("AI_FALLBACK_CLASSIFICATION_CONFIDENCE"),
+            NumberStyles.Any,
+            CultureInfo.InvariantCulture,
+            out var v) && v is >= 0m and <= 1m
+            ? v
+            : 0.6m; // Fallback de 0.7m para 0.6m - qualidade gating mais rigorosa (Priority 1 Refactoring)
+
+    /// <summary>Máximo de caracteres para truncar texto antes de enviar ao LLM (evita context window overflow).</summary>
+    public static int MaxClassificationTextChars =>
+        int.TryParse(
+            Environment.GetEnvironmentVariable("AI_MAX_CLASSIFICATION_TEXT_CHARS"),
+            NumberStyles.Any,
+            CultureInfo.InvariantCulture,
+            out var v) && v is > 0
+            ? v
+            : 8000; // Limite técnico para observabilidade (evita prompt injection por texto muito longo)
 }

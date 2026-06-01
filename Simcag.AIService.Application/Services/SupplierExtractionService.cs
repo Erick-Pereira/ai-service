@@ -3,6 +3,7 @@ using Simcag.AIService.Application.Contracts;
 using Simcag.AIService.Application.Interfaces;
 using Simcag.AIService.Application.Utilities;
 using Simcag.Shared.Events;
+using Simcag.Shared.Finance;
 using Simcag.Shared.Telemetry;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
@@ -69,9 +70,17 @@ public sealed class SupplierExtractionService : ISupplierExtractionService
                                 try
                                 {
                                     var result = await _nameNormalization.NormalizeAsync(parsed.RawSupplierName, ct);
-                                    normalized = string.IsNullOrWhiteSpace(result.NormalizedName)
-                                        ? parsed.RawSupplierName.Trim()
-                                        : result.NormalizedName;
+                                    // Se normalização remove todo o nome ou termos essenciais (LTDA, ME, LTDA.), use o nome raw
+                                    if (string.IsNullOrWhiteSpace(result.NormalizedName) || 
+                                        !result.NormalizedName.Contains(parsed.RawSupplierName, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        _logger.LogWarning("Normalização eliminou informações críticas do fornecedor; usando nome original: {RawName}", parsed.RawSupplierName);
+                                        normalized = parsed.RawSupplierName.Trim();
+                                    }
+                                    else
+                                    {
+                                        normalized = result.NormalizedName;
+                                    }
                                 }
                                 catch (Exception ex)
                                 {
@@ -117,17 +126,18 @@ public sealed class SupplierExtractionService : ISupplierExtractionService
         text.Length <= maxChars ? text : text[..maxChars];
 
     private static string BuildExtractionPrompt(string rawText) =>
-        "You extract structured data from financial or procurement document text. Return a single JSON object with:\n" +
-        "- supplierName: string (vendor/legal name if any, else empty string)\n" +
-        "- taxId: string or null (CNPJ/CPF if any)\n" +
-        "- brand: string or null (product/service brand)\n" +
-        "- model: string or null (model name or SKU-like identifier)\n" +
-        "- features: array of short strings (distinct features, specs, or service bullets; empty array if none)\n" +
-        "- supplierConfidence: number 0-1 (your confidence in supplierName/taxId)\n" +
-        "- supplierUsedFallback: boolean (true only if you are guessing supplier with weak evidence)\n" +
-        "- productConfidence: number 0-1 (your confidence in brand/model/features)\n" +
-        "- productUsedFallback: boolean (true if brand/model/features are uncertain or absent but you inferred weakly)\n" +
-        "Be conservative: use low confidence and usedFallback true when evidence is weak.\n" +
+        "You extract structured data from Brazilian financial document text (NF-e or NFS-e). " +
+        "Return a single JSON object with:\n" +
+        "- supplierName: string (PRESTADOR DE SERVIÇOS or TOMADOR if applicable, else empty string)\n" +
+        "- taxId: string or null (CNPJ/CPF do prestador ou tomador - buscar em campos como 'CNPJ', 'CPF', '18.456.782/0001-22')\n" +
+        "- brand: string or null (marca do produto/serviço)\n" +
+        "- model: string or null (modelo ou SKU)\n" +
+        "- features: array of short strings (especificações, bullets de serviço; empty if none)\n" +
+        "- supplierConfidence: number 0-1 (confiança na extração do nome e documento fiscal)\n" +
+        "- supplierUsedFallback: boolean (true apenas se estiver adivinhando com evidência fraca)\n" +
+        "- productConfidence: number 0-1 (confiança em brand/model/features)\n" +
+        "- productUsedFallback: boolean (true se brand/model/features estão incertos ou ausentes)\n" +
+        "Be conservative: use low confidence and usedFallback=true quando evidência for fraca.\n" +
         $"Document text:\n{rawText}";
 
     private async Task<string> GenerateWithCacheAsync(string prompt, CancellationToken ct)
@@ -273,6 +283,33 @@ public sealed class SupplierExtractionService : ISupplierExtractionService
 
     private async Task<SupplierExtractionResult> ExtractFallbackAsync(string rawText, CancellationToken ct)
     {
+        var hint = BrazilianDocumentSupplierExtractor.TryExtract(rawText);
+        if (!string.IsNullOrWhiteSpace(hint.Name) || !string.IsNullOrWhiteSpace(hint.TaxId))
+        {
+            var normalizedName = hint.Name ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(normalizedName))
+            {
+                try
+                {
+                    var result = await _nameNormalization.NormalizeAsync(normalizedName, ct);
+                    if (!string.IsNullOrWhiteSpace(result.NormalizedName))
+                        normalizedName = result.NormalizedName;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Supplier name normalization failed in structured fallback");
+                }
+            }
+
+            return new SupplierExtractionResult(
+                RawSupplierName: hint.Name ?? string.Empty,
+                NormalizedSupplierName: normalizedName,
+                TaxId: hint.TaxId,
+                Confidence: 0.72m,
+                UsedFallback: true,
+                Product: new ProductExtractionResult(null, null, Array.Empty<string>(), 0.35m, true));
+        }
+
         var lines = rawText.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var candidates = lines.Where(l => l.Length > 5 && l.Count(char.IsUpper) > 2).OrderByDescending(l => l.Length).FirstOrDefault() ?? string.Empty;
 

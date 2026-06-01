@@ -49,14 +49,12 @@ public sealed class ExpenseClassificationService : IExpenseClassificationService
         _inferenceTtl = AiServiceEnvironment.InferenceCacheTtl;
     }
 
-    private const int MaxClassificationTextChars = 8000;
-
     public async Task<CategoryResult> ClassifyAsync(RawFinancialDataEvent financialData, CancellationToken ct, string? classificationTextOverride = null)
     {
         var description = string.IsNullOrWhiteSpace(classificationTextOverride)
-            ? financialData.RawText
-            : classificationTextOverride;
-        description = TruncateForPrompt(description ?? string.Empty, MaxClassificationTextChars);
+     ? financialData.RawText
+     : classificationTextOverride;
+ description = TruncateForPrompt(description ?? string.Empty);
 
         // 1. Tentar IA
         if (await _ollama.IsAvailableAsync(ct))
@@ -98,7 +96,7 @@ public sealed class ExpenseClassificationService : IExpenseClassificationService
 
         // 2. Fallback: regras baseadas em keywords
         var fallbackCategory = _categoryMatcher.MatchCategory(description);
-        var fallbackConfidence = new ConfidenceScore(0.7m);
+        var fallbackConfidence = new ConfidenceScore(AiServiceEnvironment.FallbackClassificationConfidence);
         var fallbackEntity = await _categoryRepo.GetByNameAsync(fallbackCategory.Value, ct)
                           ?? await _categoryRepo.GetByNameAsync("Outro", ct);
 
@@ -157,11 +155,11 @@ public sealed class ExpenseClassificationService : IExpenseClassificationService
         return response;
     }
 
-    private static string TruncateForPrompt(string text, int maxChars)
+    private static string TruncateForPrompt(string text)
     {
-        if (text.Length <= maxChars)
+        if (text.Length <= AiServiceEnvironment.MaxClassificationTextChars)
             return text;
-        return text[..maxChars];
+        return text[..AiServiceEnvironment.MaxClassificationTextChars];
     }
 
 }

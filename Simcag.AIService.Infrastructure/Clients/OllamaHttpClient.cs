@@ -78,20 +78,20 @@ public sealed class OllamaHttpClient
         {
             activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
             _logger.LogError(ex, "Ollama server error for model {EffectiveModel} (requested {RequestedModel})", effectiveModel, model);
-            throw new AiServiceException("AI service encountered an error", ex);
+            throw new AiServiceException($"AI service encountered an error: HTTP {(int)ex.StatusCode.Value}");
         }
         catch (HttpRequestException ex) when (ex.StatusCode.HasValue && (int)ex.StatusCode.Value == 404)
         {
             activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
             _resolvedModelByRequest.TryRemove(NormalizeModelKey(model), out _);
             _logger.LogError(ex, "Ollama endpoint or model not found: effective {EffectiveModel}, requested {RequestedModel}", effectiveModel, model);
-            throw new AiServiceException("AI model not found", ex);
+            throw new AiServiceException("AI model not found in registry");
         }
         catch (HttpRequestException ex)
         {
             activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
             _logger.LogError(ex, "Network error connecting to Ollama for model {EffectiveModel} (requested {RequestedModel})", effectiveModel, model);
-            throw new AiServiceException("Unable to connect to AI service", ex);
+            throw new AiServiceException("AI service is unreachable or network connection failed");
         }
         catch (TaskCanceledException ex)
         {
