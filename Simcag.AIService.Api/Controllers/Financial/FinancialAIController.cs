@@ -8,6 +8,9 @@ using Simcag.AIService.Application.Interfaces;
 using Simcag.AIService.Application.UseCases.Financial;
 using Simcag.Shared.Contracts;
 using Simcag.Shared.Events;
+using Microsoft.AspNetCore.Diagnostics;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Simcag.AIService.Api.Controllers.Financial;
 
@@ -27,28 +30,64 @@ public sealed class FinancialAIController : ControllerBase
     private readonly INormalizeSupplierNameUseCase _normalizeSupplierName;
     private readonly IBuildEnrichedFinancialDataEventUseCase _buildEnrichedEvent;
     private readonly IPreviewFinancialEnrichmentUseCase _previewEnrichment;
+    private readonly ILogger<FinancialAIController> _logger;
 
     public FinancialAIController(
         IClassifyExpenseUseCase classifyExpense,
         IExtractSupplierUseCase extractSupplier,
         INormalizeSupplierNameUseCase normalizeSupplierName,
         IBuildEnrichedFinancialDataEventUseCase buildEnrichedEvent,
-        IPreviewFinancialEnrichmentUseCase previewEnrichment)
+        IPreviewFinancialEnrichmentUseCase previewEnrichment,
+        ILogger<FinancialAIController> logger)
     {
         _classifyExpense = classifyExpense;
         _extractSupplier = extractSupplier;
         _normalizeSupplierName = normalizeSupplierName;
         _buildEnrichedEvent = buildEnrichedEvent;
         _previewEnrichment = previewEnrichment;
+        _logger = logger;
     }
 
-    /// <summary>Processa um único item em lote para classificação de despesas, processando o pipeline completo e coletando resultados.</summary>
+    /// <summary>Logging helper para erros de AI service</summary>
+    private static ObjectResult AiFailure(AiServiceException ex) =>
+        new(ApiResponse<string>.Fail(ex.Message)) { StatusCode = StatusCodes.Status503ServiceUnavailable };
+
+    /// <summary>Logs exception com contexto estruturado</summary>
+    private IActionResult LogException(Exception ex, string operationId, string endpoint)
+    {
+        var errorContext = new
+        {
+            Endpoint = endpoint,
+            OperationId = operationId,
+            ExceptionType = ex.GetType().FullName,
+            ErrorMessage = ex.Message,
+            Timestamp = DateTime.UtcNow.ToString("o"),
+            StackTrace = ex.StackTrace
+        };
+
+        _logger.LogError(
+            JsonExceptionSerializer.Serialize(errorContext),
+            "Error in {Endpoint}: {ErrorMessage}",
+            endpoint,
+            ex.Message);
+
+        return Problem(title: "Internal Server Error", detail: ex.Message, statusCode: 500);
+    }
+
+    /// <summary>Logs info com contexto estruturado</summary>
+    private void LogInfo(string operationId, string endpoint, string message)
+    {
+        _logger.LogInformation(
+            JsonExceptionSerializer.Serialize(new { Endpoint = endpoint, OperationId = operationId, Message = message }),
+            message);
+    }
+
     private async Task<ClassifyBatchItemResult> ProcessClassifyBatchItemAsync(
         string id, string rawText, IClassifyExpenseUseCase classifyExpense, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(rawText))
             return new ClassifyBatchItemResult(id, false, "Raw text is required", null);
-        
+
         try
         {
             var financialEvent = FinancialRawEventFactory.FromClassifyOrExtract(rawText, null, null);
@@ -61,13 +100,12 @@ public sealed class FinancialAIController : ControllerBase
         }
     }
 
-    /// <summary>Processa um único item em lote para extração de fornecedores.</summary>
     private async Task<ExtractBatchItemResult> ProcessExtractBatchItemAsync(
         string id, string rawText, IExtractSupplierUseCase extractSupplier, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(rawText))
             return new ExtractBatchItemResult(id, false, "Raw text is required", null);
-        
+
         try
         {
             var financialEvent = FinancialRawEventFactory.FromClassifyOrExtract(rawText, null, null);
@@ -80,16 +118,15 @@ public sealed class FinancialAIController : ControllerBase
         }
     }
 
-    /// <summary>Processa um único item em lote para normalização de nomes.</summary>
     private async Task<NormalizeBatchItemResult> ProcessNormalizeBatchItemAsync(
-        string id, string rawText, INormalizeSupplierNameUseCase normalizeSupplierName, CancellationToken ct)
+        string id, string rawName, INormalizeSupplierNameUseCase normalizeSupplierName, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(rawText))
-            return new NormalizeBatchItemResult(id, false, "Raw text is required", null);
-        
+        if (string.IsNullOrWhiteSpace(rawName))
+            return new NormalizeBatchItemResult(id, false, "Raw name is required", null);
+
         try
         {
-            var result = await normalizeSupplierName.ExecuteAsync(rawText, ct);
+            var result = await normalizeSupplierName.ExecuteAsync(rawName, ct);
             return new NormalizeBatchItemResult(id, true, null, result);
         }
         catch (AiServiceException ex)
@@ -310,6 +347,14 @@ public sealed class FinancialAIController : ControllerBase
         }
     }
 
-    private static ObjectResult AiFailure(AiServiceException ex) =>
-        new(ApiResponse<string>.Fail(ex.Message)) { StatusCode = StatusCodes.Status503ServiceUnavailable };
+}
+
+public static class JsonExceptionSerializer
+{
+    public static string Serialize(object obj) =>
+        JsonSerializer.Serialize(obj, new JsonSerializerOptions
+        {
+            WriteIndented = false,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        });
 }

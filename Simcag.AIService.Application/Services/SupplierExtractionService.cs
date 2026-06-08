@@ -7,10 +7,13 @@ using Simcag.Shared.Finance;
 using Simcag.Shared.Telemetry;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Text.RegularExpressions;
+using System.Linq;
 
 namespace Simcag.AIService.Application.Services;
+using System.Threading.Tasks;
+
+using System.Threading.Tasks;
 
 /// <summary>
 /// Extração de fornecedor (nome, documento fiscal) e de produto/serviço (marca, modelo, funcionalidades), com confiança e fallback por bloco.
@@ -70,7 +73,6 @@ public sealed class SupplierExtractionService : ISupplierExtractionService
                                 try
                                 {
                                     var result = await _nameNormalization.NormalizeAsync(parsed.RawSupplierName, ct);
-                                    // Se normalização remove todo o nome ou termos essenciais (LTDA, ME, LTDA.), use o nome raw
                                     if (string.IsNullOrWhiteSpace(result.NormalizedName) || 
                                         !result.NormalizedName.Contains(parsed.RawSupplierName, StringComparison.OrdinalIgnoreCase))
                                     {
@@ -129,16 +131,15 @@ public sealed class SupplierExtractionService : ISupplierExtractionService
         "You extract structured data from Brazilian financial document text (NF-e or NFS-e). " +
         "Return a single JSON object with:\n" +
         "- supplierName: string (PRESTADOR DE SERVIÇOS or TOMADOR if applicable, else empty string)\n" +
-        "- taxId: string or null (CNPJ/CPF do prestador ou tomador - buscar em campos como 'CNPJ', 'CPF', '18.456.782/0001-22')\n" +
+        "- taxId: string or null (CNPJ/CPF do prestador ou tomador)\n" +
         "- brand: string or null (marca do produto/serviço)\n" +
         "- model: string or null (modelo ou SKU)\n" +
-        "- features: array of short strings (especificações, bullets de serviço; empty if none)\n" +
-        "- supplierConfidence: number 0-1 (confiança na extração do nome e documento fiscal)\n" +
-        "- supplierUsedFallback: boolean (true apenas se estiver adivinhando com evidência fraca)\n" +
-        "- productConfidence: number 0-1 (confiança em brand/model/features)\n" +
-        "- productUsedFallback: boolean (true se brand/model/features estão incertos ou ausentes)\n" +
-        "Be conservative: use low confidence and usedFallback=true quando evidência for fraca.\n" +
-        $"Document text:\n{rawText}";
+        "- features: array of short strings\n" +
+        "- supplierConfidence: number 0-1\n" +
+        "- supplierUsedFallback: boolean\n" +
+        "- productConfidence: number 0-1\n" +
+        "- productUsedFallback: boolean\n" +
+        "Be conservative.\nDocument text:\n{rawText}";
 
     private async Task<string> GenerateWithCacheAsync(string prompt, CancellationToken ct)
     {
@@ -175,9 +176,7 @@ public sealed class SupplierExtractionService : ISupplierExtractionService
 
                 if (!root.TryGetProperty("supplierName", out var nameProp))
                 {
-                    SimcagMeters.AiLlmParseFailures.Add(1,
-                        new KeyValuePair<string, object?>("kind", "supplier_extract"),
-                        new KeyValuePair<string, object?>("reason", "missing_supplierName"));
+                    SimcagMeters.AiLlmParseFailures.Add(1, new KeyValuePair<string, object?>("kind", "supplier_extract"), new KeyValuePair<string, object?>("reason", null));
                     return null;
                 }
 
@@ -283,59 +282,67 @@ public sealed class SupplierExtractionService : ISupplierExtractionService
 
     private async Task<SupplierExtractionResult> ExtractFallbackAsync(string rawText, CancellationToken ct)
     {
-        var hint = BrazilianDocumentSupplierExtractor.TryExtract(rawText);
-        if (!string.IsNullOrWhiteSpace(hint.Name) || !string.IsNullOrWhiteSpace(hint.TaxId))
+        // Tenta extrair CNPJ/CPF do texto para usar como indicador de fornecedor
+        var taxId = TryExtractTaxId(rawText);
+
+        string supplierName;
+        if (!string.IsNullOrWhiteSpace(taxId))
         {
-            var normalizedName = hint.Name ?? string.Empty;
-            if (!string.IsNullOrWhiteSpace(normalizedName))
+            // Se achou documento fiscal, busca o nome antes dele (até 50 caracteres)
+            var beforeCnpjPart = rawText.Split(taxId, StringSplitOptions.None)[0].Replace("\n", " ").Replace("\r", " ");
+            
+            // Extrai palavras alfabéticas (3+ letras) que pareçam ser nome de empresa
+            var words = System.Text.RegularExpressions.Regex.Matches(beforeCnpjPart, @"[a-zA-Z\s]{3,}")
+                .Cast<System.Text.RegularExpressions.Match>()
+                .Select(m => m.Value.Trim())
+                .Where(w => w.Length >= 3)
+                .Take(20)
+                .ToArray();
+
+            // Remove sufixos de empresa e limpa
+            var nameBeforeSuffix = string.Join(" ", words);
+            supplierName = System.Text.RegularExpressions.Regex.Replace(nameBeforeSuffix, @"\s+(LTDA|ME|EIRELI)\.", ".", 
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
+            
+            // Se ficou com algo muito curto, usa o raw text limpo
+            if (string.IsNullOrWhiteSpace(supplierName) || supplierName.Length < 5)
             {
-                try
-                {
-                    var result = await _nameNormalization.NormalizeAsync(normalizedName, ct);
-                    if (!string.IsNullOrWhiteSpace(result.NormalizedName))
-                        normalizedName = result.NormalizedName;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Supplier name normalization failed in structured fallback");
-                }
+                supplierName = "Fornecedor não identificado";
             }
-
-            return new SupplierExtractionResult(
-                RawSupplierName: hint.Name ?? string.Empty,
-                NormalizedSupplierName: normalizedName,
-                TaxId: hint.TaxId,
-                Confidence: 0.72m,
-                UsedFallback: true,
-                Product: new ProductExtractionResult(null, null, Array.Empty<string>(), 0.35m, true));
         }
-
-        var lines = rawText.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        var candidates = lines.Where(l => l.Length > 5 && l.Count(char.IsUpper) > 2).OrderByDescending(l => l.Length).FirstOrDefault() ?? string.Empty;
+        else
+        {
+            // Sem documento fiscal - busca nome padrão de empresa
+            var companyMatch = System.Text.RegularExpressions.Regex.Match(rawText, @"(?<name>\w+\s+\w+\s+(LTDA|ME|EIRELI))", 
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            
+            if (companyMatch.Groups["name"].Success)
+                supplierName = companyMatch.Groups["name"].Value;
+            else
+                supplierName = "Fornecedor não identificado";
+        }
 
         string normalized;
         try
         {
-            var result = await _nameNormalization.NormalizeAsync(candidates, ct);
-            normalized = string.IsNullOrWhiteSpace(result.NormalizedName) ? candidates.Trim() : result.NormalizedName;
+            var result = await _nameNormalization.NormalizeAsync(supplierName, ct);
+            normalized = string.IsNullOrWhiteSpace(result.NormalizedName) ? supplierName.Trim() : result.NormalizedName;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Supplier name normalization failed in fallback; using raw candidate");
-            normalized = candidates.Trim();
+            normalized = supplierName.Trim();
         }
 
-        var taxId = ExtractTaxId(rawText);
-
-        // Heurística: linha escolhida costuma ser descrição de produto; expõe como feature para o evento enriquecido.
-        IReadOnlyList<string> productFeatures = Array.Empty<string>();
-        if (!string.IsNullOrWhiteSpace(candidates))
-            productFeatures = new[] { candidates.Trim() }.ToList();
+        // Heurística: linha escolhida costuma ser descrição de produto - Array.Empty<string>() é mais eficiente
+        var productFeatures = string.IsNullOrWhiteSpace(supplierName) 
+            ? Array.Empty<string>() 
+            : new[] { supplierName.Trim() };
 
         var product = new ProductExtractionResult(null, null, productFeatures, 0.45m, true);
 
         return new SupplierExtractionResult(
-            RawSupplierName: candidates,
+            RawSupplierName: normalized,
             NormalizedSupplierName: normalized,
             TaxId: taxId,
             Confidence: 0.5m,
@@ -343,14 +350,21 @@ public sealed class SupplierExtractionService : ISupplierExtractionService
             Product: product);
     }
 
-    private static string? ExtractTaxId(string text)
+    private static string? TryExtractTaxId(string text)
     {
-        var patterns = new[] { @"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}", @"\d{14}", @"\d{3}\.\d{3}\.\d{3}-\d{2}", @"\d{11}" };
+        var patterns = new[]
+        {
+            @"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}",  // CNPJ formatado
+            @"\d{14}",                            // CNPJ não formatado
+            @"\d{3}\.\d{3}\.\d{3/}\d{2}",         // Variação com /
+            @"\d{11}"                             // CPF
+        };
+
         foreach (var pattern in patterns)
         {
-            var match = System.Text.RegularExpressions.Regex.Match(text, pattern);
-            if (match.Success)
-                return match.Value;
+            var matches = System.Text.RegularExpressions.Regex.Matches(text, pattern);
+            if (matches.Count > 0 && matches[0].Success)
+                return matches[0].Value;
         }
 
         return null;

@@ -83,8 +83,10 @@ if (!isTesting)
         : eventsExchangeFromEnv.Trim();
 
     builder.Services.AddRabbitMqEventConsumer<RawFinancialDataEvent>(EventNames.RawFinancialData, eventsExchange);
+    builder.Services.AddRabbitMqEventConsumer<DataIngestedEvent>(EventNames.AiDataIngested, eventsExchange);
     builder.Services.AddRabbitMqEventPublisher<EnrichedFinancialDataEvent>(eventsExchange);
     builder.Services.AddHostedService<FinancialDataEnrichmentWorker>();
+    builder.Services.AddHostedService<DataIngestedEnrichmentWorker>();
 }
 
 builder.Services.AddSimcagGatewayAuthentication(builder.Environment);

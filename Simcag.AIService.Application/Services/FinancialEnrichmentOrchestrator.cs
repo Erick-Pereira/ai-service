@@ -128,6 +128,7 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
         {
             DocumentId = rawData.DocumentId,
             TenantId = rawData.TenantId ?? string.Empty,
+            NotifyUserId = rawData.UploadedBy == Guid.Empty ? null : rawData.UploadedBy,
             ExpenseId = Guid.NewGuid().ToString(),
             Category = categoryResult.CategoryName,
             CategoryConfidence = categoryResult.Confidence,
