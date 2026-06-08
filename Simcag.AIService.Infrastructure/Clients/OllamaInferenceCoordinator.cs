@@ -15,7 +15,7 @@ namespace Simcag.AIService.Infrastructure.Clients;
 /// Fila interna de inferência + retentativas + circuit breaker + timeout por tentativa + modelo de fallback.
 /// Health/listagem passam direto ao HTTP (sem ocupar workers).
 /// </summary>
-public sealed class OllamaInferenceCoordinator : IOllamaClient, IHostedService, IAsyncDisposable
+public sealed class OllamaInferenceCoordinator : IOllamaClient, IHostedService
 {
     private readonly OllamaHttpClient _http;
     private readonly OllamaResilienceOptions _opt;
@@ -24,6 +24,7 @@ public sealed class OllamaInferenceCoordinator : IOllamaClient, IHostedService, 
     private Channel<InferenceWork>? _channel;
     private Task[]? _workers;
     private CancellationTokenSource? _runCts;
+    private int _stopped;
 
     public OllamaInferenceCoordinator(
         OllamaHttpClient http,
@@ -65,8 +66,13 @@ public sealed class OllamaInferenceCoordinator : IOllamaClient, IHostedService, 
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
+        if (Interlocked.Exchange(ref _stopped, 1) != 0)
+            return;
+
         if (_channel is not null)
             _channel.Writer.TryComplete();
+
+        _runCts?.Cancel();
 
         if (_workers is { Length: > 0 })
         {
@@ -80,13 +86,8 @@ public sealed class OllamaInferenceCoordinator : IOllamaClient, IHostedService, 
             }
         }
 
-        _runCts?.Cancel();
         _runCts?.Dispose();
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        await StopAsync(CancellationToken.None).ConfigureAwait(false);
+        _runCts = null;
     }
 
     public Task<string> GenerateCompletionAsync(string prompt, string model = "llama3.1", CancellationToken ct = default)
