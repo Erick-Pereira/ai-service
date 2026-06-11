@@ -51,6 +51,18 @@ public sealed class FinancialLineItemSemanticNormalizerTests
     }
 
     [Fact]
+    public void Repair_preserves_quantity_when_unit_equals_line_total()
+    {
+        var r = FinancialLineItemSemanticNormalizer.Repair(
+            "Camera IP Full HD 2MP",
+            10680m,
+            declaredQuantity: 12,
+            declaredUnitPrice: 10680m);
+        r.Quantity.Should().Be(12);
+        r.UnitPrice.Should().BeNull();
+    }
+
+    [Fact]
     public void Repair_rejects_incoherent_declared_quantity_and_unit()
     {
         var r = FinancialLineItemSemanticNormalizer.Repair(

@@ -115,6 +115,7 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
             : FinancialEnrichmentItemBuilder.Build(rawData, supplierResult).ToList();
 
         items = items.Select(FinancialLineItemSemanticNormalizer.NormalizeFinancialItem).ToList();
+        items = IngestedLinesItemEnricher.Enrich(items, rawData).ToList();
 
         if (preferAiItems)
         {

@@ -57,7 +57,7 @@ public sealed class DataIngestedEnrichmentWorker : BackgroundService
                     if (await idempotency.HasProcessedAsync(idempotencyKey, stoppingToken))
                     {
                         _logger.LogInformation(
-                            "[{CorrelationId}] Skipping already processed document {DocumentId} (key={Key})",
+                            "[{CorrelationId}] Idempotência: documento {DocumentId} já enriquecido (key={Key}); ack sem republicar.",
                             correlationId,
                             ingested.DocumentId,
                             idempotencyKey);
