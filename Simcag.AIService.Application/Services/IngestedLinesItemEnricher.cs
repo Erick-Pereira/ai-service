@@ -20,22 +20,31 @@ public static class IngestedLinesItemEnricher
         IReadOnlyList<FinancialItem> items,
         RawFinancialDataEvent raw)
     {
-        var ingested = TryParseIngestedLines(raw);
-        if (ingested.Count == 0 || items.Count == 0)
+        if (items.Count == 0)
             return items;
+
+        var ingested = TryParseIngestedLines(raw);
+        if (ingested.Count == 0)
+            return items.Select(PropagateProductCodesFromItemOnly).ToList();
 
         return items.Select(item => MergeFromIngestion(item, ingested)).ToList();
     }
 
+    private static FinancialItem PropagateProductCodesFromItemOnly(FinancialItem item) =>
+        PropagateProductCodes(item, item.Description, item.ItemCode);
+
     private static FinancialItem MergeFromIngestion(FinancialItem item, IReadOnlyList<IngestedExpenseLine> ingested)
     {
         var match = FindBestMatch(item, ingested);
-        if (match is null)
-            return item;
+        var merged = match is not null && !HasConsistentQuantityUnit(item, match)
+            ? MergeQuantityUnit(item, match)
+            : item;
 
-        if (HasConsistentQuantityUnit(item, match))
-            return item;
+        return PropagateProductCodes(merged, match?.Description, match?.ItemCode);
+    }
 
+    private static FinancialItem MergeQuantityUnit(FinancialItem item, IngestedExpenseLine match)
+    {
         var qty = match.Quantity is > 0m ? (int)Math.Round(match.Quantity.Value, MidpointRounding.AwayFromZero) : (int?)null;
         var unit = match.UnitPrice;
         if (unit is null or <= 0 && qty is > 0 && match.Amount > 0)
@@ -58,7 +67,43 @@ public static class IngestedLinesItemEnricher
             Amount = item.Amount,
             Quantity = repaired.Quantity ?? qty ?? item.Quantity,
             UnitPrice = repaired.UnitPrice ?? unit ?? item.UnitPrice,
-            ItemCode = item.ItemCode,
+            ItemCode = string.IsNullOrWhiteSpace(item.ItemCode) ? match.ItemCode : item.ItemCode,
+        };
+    }
+
+    private static FinancialItem PropagateProductCodes(
+        FinancialItem item,
+        string? ingestedDescription,
+        string? ingestedItemCode = null)
+    {
+        var code = ProductCodeHelper.TryExtractFirst(
+            item.ItemCode,
+            ingestedItemCode,
+            ingestedDescription,
+            item.Description);
+        if (code is null)
+            return item;
+
+        var itemCode = string.IsNullOrWhiteSpace(item.ItemCode)
+            ? (string.IsNullOrWhiteSpace(ingestedItemCode) ? code : ingestedItemCode)
+            : item.ItemCode;
+        var description = ProductCodeHelper.AppendCodesToDescription(
+            item.Description ?? string.Empty,
+            code,
+            ingestedItemCode,
+            ingestedDescription);
+
+        if (string.Equals(itemCode, item.ItemCode, StringComparison.Ordinal)
+            && string.Equals(description, item.Description, StringComparison.Ordinal))
+            return item;
+
+        return new FinancialItem
+        {
+            Description = description,
+            Amount = item.Amount,
+            Quantity = item.Quantity,
+            UnitPrice = item.UnitPrice,
+            ItemCode = itemCode,
         };
     }
 
@@ -118,14 +163,20 @@ public static class IngestedLinesItemEnricher
             || b.Contains(a, StringComparison.OrdinalIgnoreCase))
             return 80;
 
-        var tokensA = a.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        var tokensB = b.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var tokensA = TokenizeForMatch(a);
+        var tokensB = TokenizeForMatch(b);
         if (tokensA.Length == 0 || tokensB.Length == 0)
             return 0;
 
         var overlap = tokensA.Count(t => tokensB.Any(u => u.Equals(t, StringComparison.OrdinalIgnoreCase)));
         return (int)Math.Round(100.0 * overlap / Math.Max(tokensA.Length, tokensB.Length));
     }
+
+    private static string[] TokenizeForMatch(string text) =>
+        text.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(static t => t.Trim(',', ';', ':', '.').ToLowerInvariant())
+            .Where(static t => t.Length > 0)
+            .ToArray();
 
     private static string NormalizeKey(string? text) =>
         FinancialLineItemSemanticNormalizer.ToSearchQueryLabel(text ?? string.Empty, 96).ToLowerInvariant();

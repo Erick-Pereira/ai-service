@@ -9,11 +9,9 @@ using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Linq;
+using System.Threading.Tasks;
 
 namespace Simcag.AIService.Application.Services;
-using System.Threading.Tasks;
-
-using System.Threading.Tasks;
 
 /// <summary>
 /// Extração de fornecedor (nome, documento fiscal) e de produto/serviço (marca, modelo, funcionalidades), com confiança e fallback por bloco.
@@ -139,7 +137,10 @@ public sealed class SupplierExtractionService : ISupplierExtractionService
         "- supplierUsedFallback: boolean\n" +
         "- productConfidence: number 0-1\n" +
         "- productUsedFallback: boolean\n" +
-        "Be conservative.\nDocument text:\n{rawText}";
+        "Be conservative, but classification is never a stop condition. " +
+        "If the document is a service, fee, freight, warranty, or financial concept, still extract supplier/product signals when present " +
+        "and do not instruct downstream systems to skip market, historical, or document-anchor evidence.\n" +
+        "Document text:\n" + rawText;
 
     private async Task<string> GenerateWithCacheAsync(string prompt, CancellationToken ct)
     {

@@ -109,6 +109,7 @@ public sealed class CategoryMatcher : ICategoryMatcher
         { "caixa d'água", "Infraestrutura" },
         { "portão eletrônico", "Infraestrutura" },
         { "automação", "Infraestrutura" },
+        { "automacao", "Infraestrutura" },
         { "antena", "Infraestrutura" },
         { "para-raios", "Infraestrutura" }, // SPDA (Obrigatório por lei)
     
@@ -307,9 +308,11 @@ public sealed class CategoryMatcher : ICategoryMatcher
         { "contentor", "Infraestrutura" }
     };
 
+    public static IReadOnlyDictionary<string, string> Rules => KeywordMap;
+
     public CategoryName MatchCategory(string productDescription)
     {
-        foreach (var (keyword, category) in KeywordMap)
+        foreach (var (keyword, category) in KeywordMap.OrderByDescending(rule => rule.Key.Length))
         {
             if (productDescription.Contains(keyword, StringComparison.OrdinalIgnoreCase))
                 return new CategoryName(category);

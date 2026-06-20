@@ -116,6 +116,9 @@ public sealed class ExpenseClassificationService : IExpenseClassificationService
 
         return
             $"Classify this financial expense into one of these categories: {categoryList}. " +
+            "This label is soft routing only: never answer that the workflow should stop, skip market research, " +
+            "or treat the expense as non-product/non-benchmarkable. " +
+            "If the text is a service or financial concept, still choose the closest operational category so downstream extraction can continue. " +
             $"Expense description: {rawText}. " +
             $"Respond with only the category name.";
     }

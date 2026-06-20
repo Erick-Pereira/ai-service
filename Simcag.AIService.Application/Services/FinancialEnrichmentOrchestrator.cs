@@ -2,6 +2,8 @@ using System.Diagnostics;
 using Simcag.AIService.Application.Configuration;
 using Simcag.AIService.Application.Contracts;
 using Simcag.AIService.Application.Interfaces;
+using Simcag.AIService.Domain.Services;
+using Simcag.AIService.Domain.ValueObjects;
 using Simcag.Shared.Events;
 using Simcag.Shared.Finance;
 using Simcag.Shared.Messaging.Contracts;
@@ -20,10 +22,15 @@ namespace Simcag.AIService.Application.Services;
 /// </summary>
 public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrchestrator
 {
+    private const decimal IngestionSupplierConfidence = 0.85m;
+    private const decimal IngestionCategoryConfidence = 0.85m;
+
     private readonly IExpenseClassificationService _classificationService;
     private readonly ISupplierExtractionService _supplierExtractionService;
     private readonly IFinancialLineItemsExtractionService _lineItemsExtractor;
     private readonly INameNormalizationService _normalizationService;
+    private readonly ICategoryMatcher _categoryMatcher;
+    private readonly ICategoryRepository _categoryRepository;
     private readonly ILogger<FinancialEnrichmentOrchestrator> _logger;
     private readonly IEventPublisher<EnrichedFinancialDataEvent> _enrichedPublisher;
 
@@ -32,6 +39,8 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
         ISupplierExtractionService supplierExtractionService,
         IFinancialLineItemsExtractionService lineItemsExtractor,
         INameNormalizationService normalizationService,
+        ICategoryMatcher categoryMatcher,
+        ICategoryRepository categoryRepository,
         ILogger<FinancialEnrichmentOrchestrator> logger,
         IEventPublisher<EnrichedFinancialDataEvent> enrichedPublisher)
     {
@@ -39,6 +48,8 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
         _supplierExtractionService = supplierExtractionService;
         _lineItemsExtractor = lineItemsExtractor;
         _normalizationService = normalizationService;
+        _categoryMatcher = categoryMatcher;
+        _categoryRepository = categoryRepository;
         _logger = logger;
         _enrichedPublisher = enrichedPublisher;
     }
@@ -60,22 +71,45 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
             rawData.DocumentId,
             publish);
 
-        // 1) Extração estruturada de linhas (LLM) — alimenta classificação/fornecedor com texto mais limpo que o PDF bruto.
+        // 1) Extração estruturada de linhas — fast-path quando ingestão já parseou a NF.
         FinancialLineItemsExtractionResult lineItemsResult;
-        using (SimcagActivitySources.Pipeline.StartActivity("ai.line_items.extract"))
-            lineItemsResult = await _lineItemsExtractor.ExtractAsync(rawData, ct);
+        var usedIngestionLines = TryBuildLineItemsFromIngestion(rawData, out var ingestedFastPath);
+        if (usedIngestionLines)
+        {
+            lineItemsResult = ingestedFastPath;
+            _logger.LogInformation(
+                "Fast-path: usando {Count} linha(s) da ingestão para documento {DocumentId} (skip LLM line-items)",
+                lineItemsResult.Items.Count,
+                rawData.DocumentId);
+        }
+        else
+        {
+            using (SimcagActivitySources.Pipeline.StartActivity("ai.line_items.extract"))
+                lineItemsResult = await _lineItemsExtractor.ExtractAsync(rawData, ct);
+        }
         var structuredSummary = BuildLineItemsSummary(lineItemsResult);
         var promptOverride = ShouldUseStructuredPrompt(lineItemsResult, structuredSummary)
             ? structuredSummary
             : null;
 
-        // Sequencial: reduz pressão no Ollama.
         CategoryResult categoryResult;
         SupplierExtractionResult supplierResult;
-        using (SimcagActivitySources.Pipeline.StartActivity("ai.classify"))
-            categoryResult = await _classificationService.ClassifyAsync(rawData, ct, promptOverride);
-        using (SimcagActivitySources.Pipeline.StartActivity("ai.supplier_extract"))
-            supplierResult = await _supplierExtractionService.ExtractAsync(rawData, ct, promptOverride);
+        if (usedIngestionLines)
+        {
+            _logger.LogInformation(
+                "Fast-path: classificação e fornecedor por regras/ingestão para documento {DocumentId} (skip Ollama classify+supplier)",
+                rawData.DocumentId);
+            categoryResult = await ClassifyFromIngestionRulesAsync(lineItemsResult, structuredSummary, ct);
+            supplierResult = await ExtractSupplierFromIngestionAsync(rawData, ct);
+        }
+        else
+        {
+            // Sequencial: reduz pressão no Ollama.
+            using (SimcagActivitySources.Pipeline.StartActivity("ai.classify"))
+                categoryResult = await _classificationService.ClassifyAsync(rawData, ct, promptOverride);
+            using (SimcagActivitySources.Pipeline.StartActivity("ai.supplier_extract"))
+                supplierResult = await _supplierExtractionService.ExtractAsync(rawData, ct, promptOverride);
+        }
 
         // Normalizar nome do fornecedor (se não foi normalizado na extração)
         var normalizedSupplierName = supplierResult.NormalizedSupplierName;
@@ -150,8 +184,25 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
 
         if (publish)
         {
+            var publishPayload = new EnrichedFinancialDataEvent
+            {
+                DocumentId = enrichedEvent.DocumentId,
+                TenantId = enrichedEvent.TenantId,
+                NotifyUserId = enrichedEvent.NotifyUserId,
+                ExpenseId = enrichedEvent.ExpenseId,
+                Category = enrichedEvent.Category,
+                CategoryConfidence = enrichedEvent.CategoryConfidence,
+                Supplier = enrichedEvent.Supplier,
+                Product = enrichedEvent.Product,
+                Items = [],
+                OverallConfidence = enrichedEvent.OverallConfidence,
+                UsedFallback = enrichedEvent.UsedFallback,
+                EnrichedAt = enrichedEvent.EnrichedAt,
+                SourceEventId = enrichedEvent.SourceEventId,
+                TriggerBenchmark = false,
+            };
             using (SimcagActivitySources.Messaging.StartActivity("rabbitmq.publish.enriched"))
-                await _enrichedPublisher.PublishAsync(enrichedEvent, ct);
+                await _enrichedPublisher.PublishAsync(publishPayload, ct);
         }
 
         _logger.LogInformation(
@@ -179,4 +230,141 @@ public sealed class FinancialEnrichmentOrchestrator : IFinancialEnrichmentOrches
 
     private static bool ShouldPreferAiLineItems(FinancialLineItemsExtractionResult r) =>
         r.Items.Count > 0 && (!r.UsedFallback || r.Items.Count >= 2 || r.Confidence >= 0.45m);
+
+    private async Task<CategoryResult> ClassifyFromIngestionRulesAsync(
+        FinancialLineItemsExtractionResult lineItems,
+        string structuredSummary,
+        CancellationToken ct)
+    {
+        var description = !string.IsNullOrWhiteSpace(structuredSummary)
+            ? structuredSummary
+            : string.Join(" ", lineItems.Items.Select(i => i.Description).Where(d => !string.IsNullOrWhiteSpace(d)));
+
+        if (string.IsNullOrWhiteSpace(description))
+            description = "despesa";
+
+        var matched = _categoryMatcher.MatchCategory(description);
+        var entity = await _categoryRepository.GetByNameAsync(matched.Value, ct)
+                     ?? await _categoryRepository.GetByNameAsync("Outro", ct);
+
+        return new CategoryResult(
+            entity?.Id ?? Guid.Empty,
+            matched.Value,
+            IngestionCategoryConfidence,
+            "Rule-based classification from ingested line items",
+            UsedFallback: true);
+    }
+
+    private async Task<SupplierExtractionResult> ExtractSupplierFromIngestionAsync(
+        RawFinancialDataEvent raw,
+        CancellationToken ct)
+    {
+        var emptyProduct = new ProductExtractionResult(null, null, Array.Empty<string>(), 0m, true);
+        var rawName = GetExtractedString(raw, "supplierName", "SupplierName");
+        if (string.IsNullOrWhiteSpace(rawName))
+        {
+            return new SupplierExtractionResult(
+                string.Empty,
+                string.Empty,
+                null,
+                0.3m,
+                true,
+                emptyProduct);
+        }
+
+        rawName = rawName.Trim();
+        var taxId = GetExtractedString(raw, "supplierTaxId", "SupplierTaxId");
+        var normalized = rawName;
+        try
+        {
+            var norm = await _normalizationService.NormalizeAsync(rawName, ct);
+            if (!string.IsNullOrWhiteSpace(norm.NormalizedName))
+                normalized = norm.NormalizedName;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Normalização do fornecedor da ingestão falhou; usando nome bruto");
+        }
+
+        return new SupplierExtractionResult(
+            rawName,
+            normalized,
+            string.IsNullOrWhiteSpace(taxId) ? null : taxId.Trim(),
+            IngestionSupplierConfidence,
+            false,
+            emptyProduct);
+    }
+
+    private static string? GetExtractedString(RawFinancialDataEvent raw, params string[] keys)
+    {
+        foreach (var key in keys)
+        {
+            if (!raw.ExtractedFields.TryGetValue(key, out var value) || value is null)
+                continue;
+
+            var text = value switch
+            {
+                string s => s,
+                System.Text.Json.JsonElement el when el.ValueKind == System.Text.Json.JsonValueKind.String => el.GetString(),
+                _ => value.ToString(),
+            };
+
+            if (!string.IsNullOrWhiteSpace(text))
+                return text;
+        }
+
+        return null;
+    }
+
+    private static bool TryBuildLineItemsFromIngestion(
+        RawFinancialDataEvent raw,
+        out FinancialLineItemsExtractionResult result)
+    {
+        result = new FinancialLineItemsExtractionResult(Array.Empty<FinancialItem>(), null, 0m, true);
+        if (!raw.ExtractedFields.TryGetValue("ingestedLinesJson", out var jsonObj))
+            return false;
+
+        var json = jsonObj switch
+        {
+            string s => s,
+            System.Text.Json.JsonElement el when el.ValueKind == System.Text.Json.JsonValueKind.String => el.GetString() ?? string.Empty,
+            _ => System.Text.Json.JsonSerializer.Serialize(jsonObj),
+        };
+
+        if (string.IsNullOrWhiteSpace(json))
+            return false;
+
+        try
+        {
+            var lines = System.Text.Json.JsonSerializer.Deserialize<List<IngestedExpenseLineDto>>(json,
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (lines is null || lines.Count == 0)
+                return false;
+
+            var items = lines.Select(l => new FinancialItem
+            {
+                Description = l.Description ?? string.Empty,
+                Amount = l.Amount,
+                Quantity = l.Quantity is > 0m ? (int)Math.Round(l.Quantity.Value, MidpointRounding.AwayFromZero) : null,
+                UnitPrice = l.UnitPrice,
+                ItemCode = l.ItemCode,
+            }).ToList();
+
+            result = new FinancialLineItemsExtractionResult(items, null, 0.85m, false);
+            return true;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
+    }
+
+    private sealed class IngestedExpenseLineDto
+    {
+        public string? Description { get; set; }
+        public decimal Amount { get; set; }
+        public decimal? Quantity { get; set; }
+        public decimal? UnitPrice { get; set; }
+        public string? ItemCode { get; set; }
+    }
 }

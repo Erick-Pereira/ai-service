@@ -15,11 +15,9 @@ public interface ICategoryResponseExtractor
 /// </summary>
 public sealed class CategoryResponseExtractor : ICategoryResponseExtractor
 {
-    private static readonly string[] KnownCategories = { "Notebook", "Monitor", "Periférico", "Hardware", "Software", "Outro" };
-
     public CategoryName Extract(string aiResponse)
     {
-        foreach (var category in KnownCategories)
+        foreach (var category in CategoryName.AllowedNames.OrderByDescending(c => c.Length))
         {
             if (aiResponse.Contains(category, StringComparison.OrdinalIgnoreCase))
                 return new CategoryName(category);

@@ -1,5 +1,6 @@
 using Simcag.AIService.Application.Interfaces;
 using Simcag.AIService.Domain.Entities;
+using Simcag.AIService.Domain.ValueObjects;
 using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
 using System.Threading;
@@ -20,16 +21,9 @@ public sealed class InMemoryCategoryRepository : ICategoryRepository
     {
         _logger = logger;
 
-        // Seed com categorias padrão
-        var defaultCategories = new[]
-        {
-            ProductCategory.Create("Notebook", "Laptops and portable computers"),
-            ProductCategory.Create("Monitor", "Displays and screens"),
-            ProductCategory.Create("Periférico", "Peripherals like mouse, keyboard, webcam"),
-            ProductCategory.Create("Hardware", "Computer components"),
-            ProductCategory.Create("Software", "Applications and licenses"),
-            ProductCategory.Create("Outro", "Other products")
-        };
+        var defaultCategories = CategoryName.AllowedNames
+            .Select(name => ProductCategory.Create(name, $"Categoria operacional: {name}"))
+            .ToArray();
 
         foreach (var cat in defaultCategories)
         {

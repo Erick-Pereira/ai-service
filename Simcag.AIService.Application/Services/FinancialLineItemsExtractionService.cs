@@ -105,6 +105,8 @@ public sealed class FinancialLineItemsExtractionService : IFinancialLineItemsExt
         sb.AppendLine("- unitPrice: BRL per unit when the document shows unit price; omit or null if unknown.");
         sb.AppendLine("- One object per expense ROW (detail lines). Prefer detail lines over a single grand total when both exist.");
         sb.AppendLine("- description: PT-BR label ONLY (no R$, no amounts, no quantity, no column headers). Clean labels like 'Taxa Condominial', 'Manutenção de Elevadores'. If OCR glued values into the text, still output the clean label you infer.");
+        sb.AppendLine("- PRODUCT vs FINANCIAL_CONCEPT is soft routing only. Do not suppress service, fee, warranty, freight, or maintenance lines when they have money.");
+        sb.AppendLine("- Never stop early because an item seems non-product; emit the monetary row and let downstream market/history/document evidence decide.");
         sb.AppendLine("- If there are NO monetary line items, return items:[], confidence low, usedFallback:true.");
         sb.AppendLine("- confidence: 0-1 for how sure you are about items[]. usedFallback:true if you guessed.");
         sb.AppendLine("- documentTitle: extract from 'Número da Nota', 'Nº Documento', or similar fields");

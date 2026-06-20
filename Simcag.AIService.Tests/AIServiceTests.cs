@@ -7,6 +7,7 @@ using Simcag.AIService.Application.Services;
 using Simcag.AIService.Domain.Entities;
 using Simcag.AIService.Domain.Services;
 using Simcag.AIService.Domain.ValueObjects;
+using Simcag.AIService.Infrastructure.Persistence.Repositories;
 using Simcag.Shared.Events;
 using System.Collections.Generic;
 using System.Threading;
@@ -20,6 +21,46 @@ namespace Simcag.AIService.Tests;
 /// </summary>
 public class FinancialAIServiceTests
 {
+    [Fact]
+    public void CategoryResponseExtractor_ShouldRecognizeAllDomainCategories()
+    {
+        var extractor = new CategoryResponseExtractor();
+
+        var result = extractor.Extract("A despesa pertence à categoria Manutenção.");
+
+        result.Value.Should().Be("Manutenção");
+    }
+
+    [Fact]
+    public async Task InMemoryCategoryRepository_ShouldSeedAllAllowedDomainCategories()
+    {
+        var loggerMock = new Mock<ILogger<InMemoryCategoryRepository>>();
+        var repository = new InMemoryCategoryRepository(loggerMock.Object);
+
+        var category = await repository.GetByNameAsync("Manutenção", CancellationToken.None);
+
+        category.Should().NotBeNull();
+        category!.Name.Value.Should().Be("Manutenção");
+    }
+
+    [Fact]
+    public void CategoryMatcher_ShouldExposeOnlyAllowedCategoryRules()
+    {
+        CategoryMatcher.Rules.Should().NotBeEmpty();
+        CategoryMatcher.Rules.Values.Should().OnlyContain(category =>
+            CategoryName.AllowedNames.Contains(category, StringComparer.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void CategoryMatcher_ShouldPreferMostSpecificKeyword()
+    {
+        var matcher = new CategoryMatcher();
+
+        var result = matcher.MatchCategory("contratação de software de gestão condominial");
+
+        result.Value.Should().Be("Tecnologia");
+    }
+
     // ---------- Expense Classification Tests ----------
     [Fact]
     public async Task ClassifyAsync_ShouldReturnAICategory_WhenOllamaAvailable()
@@ -201,6 +242,48 @@ public class FinancialAIServiceTests
         result.Product.UsedFallback.Should().BeFalse();
         result.Confidence.Should().Be(0.9m);
         result.UsedFallback.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task ExtractAsync_PassesDocumentTextInPrompt_NotLiteralPlaceholder()
+    {
+        var ollamaMock = new Mock<IOllamaClient>();
+        var loggerMock = new Mock<ILogger<SupplierExtractionService>>();
+        string? capturedPrompt = null;
+
+        const string docText = "PRESTADOR: Elevadores Brasil LTDA - Manutenção de elevadores bloco B";
+        var rawData = new RawFinancialDataEvent
+        {
+            DocumentId = "doc-prompt",
+            RawText = docText,
+            DocumentType = "Invoice",
+            Source = "test",
+            OccurredAt = DateTime.UtcNow,
+            Timestamp = DateTime.UtcNow,
+            ExtractedFields = new Dictionary<string, object?>(),
+            FileHash = string.Empty,
+            ExtractedItems = null
+        };
+
+        ollamaMock.Setup(x => x.IsAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        ollamaMock
+            .Setup(x => x.GenerateCompletionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((prompt, _, _) => capturedPrompt = prompt)
+            .ReturnsAsync("{\"supplierName\": \"Elevadores Brasil\", \"taxId\": null}");
+
+        var nameNormalizationMock = new Mock<INameNormalizationService>();
+        var inferenceCacheMock = new Mock<IAiInferenceCache>();
+        var service = new SupplierExtractionService(
+            ollamaMock.Object,
+            loggerMock.Object,
+            nameNormalizationMock.Object,
+            inferenceCacheMock.Object);
+
+        await service.ExtractAsync(rawData, CancellationToken.None);
+
+        capturedPrompt.Should().NotBeNullOrWhiteSpace();
+        capturedPrompt.Should().Contain("Manutenção de elevadores bloco B");
+        capturedPrompt.Should().NotContain("{rawText}");
     }
 
     [Fact]

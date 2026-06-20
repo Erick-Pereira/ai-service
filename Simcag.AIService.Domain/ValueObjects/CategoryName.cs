@@ -6,10 +6,14 @@ namespace Simcag.AIService.Domain.ValueObjects;
 /// </summary>
 public readonly record struct CategoryName
 {
-    private static readonly HashSet<string> AllowedCategories = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "Notebook", "Monitor", "Periférico", "Hardware","Jardinagem","Pintura","Ferragens","Material Hidráulico","Material Elétrico" ,"Software","Utensílios","Manutenção","Elétrica", "Conservação", "Segurança", "Produtos de Limpeza", "Administrativo", "Suprimentos", "Infraestrutura", "Tecnologia","Lazer", "Hidráulica", "Acessibilidade", "Gestão", "Eventos", "Conveniência", "Serviços","RH", "Taxas", "Sustentabilidade" , "Outro"
-    };
+    private static readonly string[] AllowedCategoryNames =
+    [
+        "Notebook", "Monitor", "Periférico", "Hardware","Jardinagem","Pintura","Ferragens","Ferramentas","Material Hidráulico","Material Elétrico" ,"Software","Utensílios","Manutenção","Elétrica", "Conservação", "Segurança", "Produtos de Limpeza", "Administrativo", "Suprimentos", "Infraestrutura", "Tecnologia","Lazer", "Hidráulica", "Acessibilidade", "Gestão", "Eventos", "Conveniência", "Serviços","RH", "Taxas", "Sustentabilidade" , "Outro"
+    ];
+
+    private static readonly HashSet<string> AllowedCategories = new(AllowedCategoryNames, StringComparer.OrdinalIgnoreCase);
+
+    public static IReadOnlyList<string> AllowedNames => AllowedCategoryNames;
 
     public string Value { get; init; }
 
@@ -19,7 +23,7 @@ public readonly record struct CategoryName
             throw new ArgumentException("Category name is required", nameof(value));
 
         if (!AllowedCategories.Contains(value))
-            throw new ArgumentException($"Invalid category. Must be one of: {string.Join(", ", AllowedCategories)}", nameof(value));
+            throw new ArgumentException($"Invalid category. Must be one of: {string.Join(", ", AllowedCategoryNames)}", nameof(value));
 
         Value = value;
     }
